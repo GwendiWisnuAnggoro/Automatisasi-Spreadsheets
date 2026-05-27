@@ -1,0 +1,79 @@
+
+        /* =======================================================
+           CSS SCOPED UNTUK TIKTOK SCRAPER (APP 1)
+        ======================================================== */
+        :root { 
+            --ts-bg: transparent; --ts-card: #1e293b; --ts-text: #f1f5f9; --ts-text-muted: #94a3b8;
+            --ts-primary: #6366f1; --ts-primary-hover: #4f46e5; --ts-danger: #ef4444; --ts-success: #22c55e; 
+            --ts-border: #334155; --ts-bg-highlight: #1e293b; 
+        }
+        #tiktok-scraper { font-family: 'Inter', system-ui, sans-serif; color: var(--ts-text); line-height: 1.5; }
+        #tiktok-scraper .ts-card { background: var(--ts-card); border-radius: 12px; padding: 24px; margin-bottom: 20px; border: 1px solid var(--ts-border); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        #tiktok-scraper h2 { font-size: 1.25rem; margin: 0 0 15px 0; color: #ffffff; font-weight: bold; }
+        #tiktok-scraper h1.ts-title { font-size: 1.25rem; margin: 0 0 5px 0; color: #ffffff; font-weight: bold;}
+        #tiktok-scraper p.ts-subtitle { color: var(--ts-text-muted); font-size: 0.85rem; margin-bottom: 24px; }
+        #tiktok-scraper .ts-label { font-size: 0.75rem; font-weight: 600; color: var(--ts-text-muted); text-transform: uppercase; margin-bottom: 8px; display: block; letter-spacing: 0.05em; }
+        
+        #tiktok-scraper .account-row { display: flex; gap: 8px; margin-bottom: 8px; }
+        #tiktok-scraper input[type="text"], #tiktok-scraper input[type="date"], #tiktok-scraper select { 
+            background: #0f172a; border: 1px solid var(--ts-border); color: white; 
+            padding: 10px 12px; border-radius: 6px; width: 100%; box-sizing: border-box; 
+            font-family: inherit; font-size: 0.9rem;
+        }
+        #tiktok-scraper input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); cursor: pointer; }
+        
+        #tiktok-scraper .date-item { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+        #tiktok-scraper .date-label { font-size: 0.75rem; color: var(--ts-text-muted); width: 60px; font-weight: 500; }
+        
+        #tiktok-scraper button { font-family: inherit; padding: 10px 16px; border-radius: 6px; border: none; cursor: pointer; font-weight: 500; font-size: 0.85rem; transition: all 0.2s; }
+        #tiktok-scraper button:hover { opacity: 0.9; }
+        #tiktok-scraper .btn-add { background: transparent; border: 1px dashed var(--ts-border); color: var(--ts-text-muted); width: 100%; margin-bottom: 24px; }
+        #tiktok-scraper .btn-add:hover { border-color: var(--ts-text); color: var(--ts-text); }
+        #tiktok-scraper .btn-del { background: var(--ts-danger); color: white; display: flex; align-items: center; justify-content: center; }
+        #tiktok-scraper .btn-action { background: var(--ts-primary); color: white; width: 100%; padding: 12px; margin-top: 15px; font-weight: 600; font-size: 1rem; }
+        #tiktok-scraper .btn-action:disabled { background: var(--ts-border); color: var(--ts-text-muted); cursor: not-allowed; }
+        #tiktok-scraper .btn-success { background: var(--ts-success); color: white; padding: 6px 12px; font-size: 0.8rem; }
+        #tiktok-scraper .btn-danger-sm { background: var(--ts-danger); color: white; padding: 6px 12px; font-size: 0.8rem; }
+
+        #tiktok-scraper #logArea { background: #000000; color: var(--ts-success); font-family: monospace; padding: 15px; border-radius: 8px; font-size: 0.85rem; display: none; margin-bottom: 20px; border: 1px solid var(--ts-border); }
+        
+        #tiktok-scraper .search-box { background: var(--ts-bg); padding: 15px; border-radius: 8px; margin: 15px 0; border: 1px solid var(--ts-border); }
+        
+        #tiktok-scraper .tabs { display: flex; gap: 15px; margin-bottom: 15px; border-bottom: 1px solid var(--ts-border); }
+        #tiktok-scraper .tab { padding: 10px 5px; cursor: pointer; font-weight: 500; color: var(--ts-text-muted); font-size: 0.9rem; position: relative; bottom: -1px; }
+        #tiktok-scraper .tab.active { color: var(--ts-primary); border-bottom: 2px solid var(--ts-primary); }
+        
+        #tiktok-scraper .data-list { max-height: 600px; overflow-y: auto; border: 1px solid var(--ts-border); border-radius: 8px; background: #0f172a; }
+        #tiktok-scraper .data-list::-webkit-scrollbar { width: 8px; }
+        #tiktok-scraper .data-list::-webkit-scrollbar-track { background: var(--ts-bg); }
+        #tiktok-scraper .data-list::-webkit-scrollbar-thumb { background: var(--ts-border); border-radius: 4px; }
+        
+        #tiktok-scraper .data-item { display: flex; justify-content: space-between; align-items: flex-start; padding: 16px; border-bottom: 1px solid var(--ts-border); }
+        #tiktok-scraper .data-item:last-child { border-bottom: none; }
+        #tiktok-scraper .data-item.highlight-match { border-left: 3px solid var(--ts-primary); background-color: rgba(99, 102, 241, 0.1); }
+        #tiktok-scraper .data-item.manual-restored { border-left: 3px solid var(--ts-success); background-color: rgba(34, 197, 94, 0.05); }
+        
+        #tiktok-scraper .data-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 6px; color: var(--ts-text); }
+        #tiktok-scraper .data-meta { font-size: 0.8rem; color: var(--ts-text-muted); line-height: 1.6; }
+        #tiktok-scraper .stat-highlight { color: #cbd5e1; }
+        #tiktok-scraper .reason-badge { color: #fca5a5; font-weight: 500; font-size: 0.75rem; background: rgba(239, 68, 68, 0.1); padding: 2px 8px; border-radius: 4px; margin-top: 4px; display: inline-block; border: 1px solid rgba(239, 68, 68, 0.2); }
+
+        #tiktok-scraper .group-header { padding: 10px 16px; font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid var(--ts-border); text-transform: uppercase; letter-spacing: 0.05em; }
+        #tiktok-scraper .header-match { background: rgba(99, 102, 241, 0.15); color: #818cf8; }
+        #tiktok-scraper .header-other { background: var(--ts-card); color: var(--ts-text-muted); border-top: 1px solid var(--ts-border); }
+
+        /* =======================================================
+           CSS UNTUK MAPPING TOOL (APP 2)
+        ======================================================== */
+        body { font-family: 'Inter', sans-serif; }
+        .custom-scroll::-webkit-scrollbar { height: 5px; width: 5px; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 99px; }
+        .custom-scroll::-webkit-scrollbar-thumb:hover { background: #475569; }
+        .custom-scroll::-webkit-scrollbar-track { background: transparent; }
+
+        .hide-arrows::-webkit-outer-spin-button,
+        .hide-arrows::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        .hide-arrows { -moz-appearance: textfield; }
+
+        .animate-fadeIn { animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }

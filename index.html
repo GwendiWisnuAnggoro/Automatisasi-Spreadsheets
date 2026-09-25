@@ -23,44 +23,86 @@
     </div>
 
     <div id="tiktok-scraper" class="w-full">
-        <div class="ts-card">
-            <h1 class="ts-title">AMBIL DATA DARI TIKTOK</h1>
-            <p class="ts-subtitle">Ambil data langsung dari TikTok</p>
 
-            <label class="ts-label">Username</label>
-            <div id="accountList">
-                <div class="account-row">
-                    <input type="text" class="username-input" placeholder="Masukkan tanpa @">
-                    <button class="btn-del" onclick="removeRow(this)">✕</button>
-                </div>
-            </div>
-            <button class="btn-add" onclick="addRow()">+ Tambah Akun Lain</button>
+        <div class="main-tabs">
+            <button type="button" class="main-tab-btn active" id="mainTabBtn-download" onclick="switchMainTab('download')">
+                <i data-lucide="download"></i> Download TikTok
+            </button>
+            <button type="button" class="main-tab-btn" id="mainTabBtn-laporan" onclick="switchMainTab('laporan')">
+                <i data-lucide="clipboard-list"></i> Laporan
+            </button>
+        </div>
 
-            <label class="ts-label">Filter Tanggal</label>
-            <div style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 5px;">
-                <select id="dateMode" onchange="toggleDateUI()">
-                    <option value="single">Tanggal Itu saja</option>
-                    <option value="range">Tanggal Awal - Tanggal Akhir</option>
+        <div id="mainTab-download" class="main-tab-content active">
+            <div class="ts-card">
+                <h1 class="ts-title">DOWNLOAD VIDEO TIKTOK</h1>
+                <p class="ts-subtitle">Tempel link video TikTok untuk ambil video, audio, statistik, & status Keranjang Kuning</p>
+
+                <label class="ts-label">Link Video TikTok</label>
+                <input type="text" id="tkDlUrl" placeholder="https://www.tiktok.com/@user/video/...">
+
+                <label class="ts-label" style="margin-top: 15px;">Kualitas Video</label>
+                <select id="tkDlRes">
+                    <option value="hd">HD</option>
+                    <option value="sd">SD</option>
                 </select>
-                <div id="dateInputs" style="display: flex; flex-direction: column; gap: 8px; margin-top: 5px;"></div>
+
+                <button class="btn-action" id="tkDlBtn" onclick="processTikTokDownload()">Proses Link</button>
+
+                <div id="tkDlProgress" class="tkdl-progress-box">
+                    <div class="tkdl-progress-labels">
+                        <span id="tkDlProgressState">Memproses...</span>
+                        <span id="tkDlProgressPercent">0%</span>
+                    </div>
+                    <div class="tkdl-progress-bg"><div class="tkdl-progress-fill" id="tkDlProgressBar"></div></div>
+                </div>
+
+                <div id="tkDlResult" class="tkdl-result"></div>
+            </div>
+        </div>
+
+        <div id="mainTab-laporan" class="main-tab-content">
+            <div id="laporanApiStatus" class="laporan-api-status">
+                <i data-lucide="loader" class="spin"></i> Memeriksa status API...
             </div>
 
-            <button class="btn-action" id="btn-start-scrape" onclick="startScraping()" disabled>Ambil Data</button>
-        </div>
+            <div class="ts-card">
+                <h1 class="ts-title">AMBIL DATA DARI TIKTOK</h1>
+                <p class="ts-subtitle">Ambil data langsung dari TikTok</p>
 
-        <div id="logArea"></div>
-        <div id="resultsArea"></div>
-    </div>
+                <label class="ts-label">Username</label>
+                <div id="accountList">
+                    <div class="account-row">
+                        <input type="text" class="username-input" placeholder="Masukkan tanpa @">
+                        <button class="btn-del" onclick="removeRow(this)">✕</button>
+                    </div>
+                </div>
+                <button class="btn-add" onclick="addRow()">+ Tambah Akun Lain</button>
 
-    <div class="flex items-center justify-center py-2">
-        <div class="flex-grow h-px bg-slate-800"></div>
-        <div class="mx-4 bg-slate-900 border border-slate-700 text-slate-500 rounded-full p-2 shadow-lg">
-            <i data-lucide="arrow-down" class="w-5 h-5"></i>
-        </div>
-        <div class="flex-grow h-px bg-slate-800"></div>
-    </div>
+                <label class="ts-label">Filter Tanggal</label>
+                <div style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 5px;">
+                    <select id="dateMode" onchange="toggleDateUI()">
+                        <option value="single">Tanggal Itu saja</option>
+                        <option value="range">Tanggal Awal - Tanggal Akhir</option>
+                    </select>
+                    <div id="dateInputs" style="display: flex; flex-direction: column; gap: 8px; margin-top: 5px;"></div>
+                </div>
 
-    <div id="sheet-mapper" class="w-full space-y-6 pb-12">
+                <button class="btn-action" id="btn-start-scrape" onclick="startScraping()" disabled>Ambil Data</button>
+            </div>
+
+            <div id="logArea"></div>
+            <div id="resultsArea"></div>
+
+            <div class="flex items-center justify-center py-2">
+                <div class="flex-grow h-px bg-slate-800"></div>
+                <div class="mx-4 bg-slate-900 border border-slate-700 text-slate-500 rounded-full p-2 shadow-lg">
+                    <i data-lucide="arrow-down" class="w-5 h-5"></i>
+                </div>
+                <div class="flex-grow h-px bg-slate-800"></div>
+            </div>
+
+            <div id="sheet-mapper" class="w-full space-y-6 pb-12">
         <div class="flex justify-between items-center bg-slate-900 p-5 rounded-2xl border border-slate-800 shadow-xl">
             <div>
                 <h1 class="text-lg font-bold tracking-tight text-white">2. Pemetaan & Push Data ke Google Sheets</h1>
@@ -162,9 +204,19 @@
                 <span>MASUKKAN KE SPREADSHEET</span>
             </button>
         </div>
+            </div>
+        </div>
+
     </div>
 </div>
 
-<script src="script.js"></script>
+<div id="videoPreviewOverlay" class="video-preview-overlay" onclick="closeVideoPreview(event)">
+    <div class="video-preview-box" onclick="event.stopPropagation()">
+        <button type="button" class="video-preview-close" onclick="closeVideoPreview()"><i data-lucide="x"></i></button>
+        <div id="videoPreviewBody" class="video-preview-body"></div>
+    </div>
+</div>
+
+<script src="script.js?v=3"></script>
 </body>
 </html>

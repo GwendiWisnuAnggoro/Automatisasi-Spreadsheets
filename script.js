@@ -36,6 +36,33 @@
     const ACTOR_ID = 'GdWCkxBtKWOsKjdch';
     let isCheckingConfig = false;
     let isFirstLoad = true;
+    let laporanTabStarted = false;
+
+    /* =======================================================
+       TAB UTAMA: DOWNLOAD TIKTOK vs LAPORAN
+       Tab Download aktif duluan & tidak butuh API sama sekali.
+       API baru dicek pas pertama kali tab Laporan dibuka.
+    ======================================================== */
+    function switchMainTab(tab) {
+        const isLaporan = tab === 'laporan';
+
+        const btnDl = panggilElementDariID('mainTabBtn-download');
+        const btnLp = panggilElementDariID('mainTabBtn-laporan');
+        const paneDl = panggilElementDariID('mainTab-download');
+        const paneLp = panggilElementDariID('mainTab-laporan');
+
+        if (isLaporan) { ClassListHapus(btnDl, 'active'); ClassListTambah(btnLp, 'active'); }
+        else { ClassListTambah(btnDl, 'active'); ClassListHapus(btnLp, 'active'); }
+
+        if (isLaporan) { ClassListHapus(paneDl, 'active'); ClassListTambah(paneLp, 'active'); }
+        else { ClassListTambah(paneDl, 'active'); ClassListHapus(paneLp, 'active'); }
+
+        if (isLaporan && !laporanTabStarted) {
+            laporanTabStarted = true;
+            setInputsDisableState('all', true);
+            loadConfigLoop();
+        }
+    }
 
     function ambilDataSheet(sheetId, kolom) {
         return new Promise((resolve, reject) => {
@@ -187,6 +214,9 @@
     function handleAppStatus() {
         if (isFirstLoad) return;
 
+        const apiStatusBox = panggilElementDariID('laporanApiStatus');
+        if (apiStatusBox) apiStatusBox.style.display = 'none';
+
         const isGsValid = gsApiLinks.length > 0;
         const isApifyValid = apifyTokens.length > 0;
 
@@ -297,6 +327,144 @@
         throw new Error("Server Eror! Coba lagi Besok");
     }
 
+    // =======================================================
+    // DETEKSI DROPDOWN ASLI DARI KOLOM SPREADSHEET TUJUAN (TANPA BACKEND)
+    // Beda dengan detectColumnTypes() yang cuma menebak dari isi file CSV --
+    // ini nanya LANGSUNG ke Google Sheets API v4 pakai API KEY publik saja
+    // (tanpa lewat backend Apps Script/token internal sama sekali), apakah
+    // kolom yang dipilih (misal kolom F) punya aturan Data Validation berupa
+    // dropdown, lalu ambil daftar pilihannya apa adanya.
+    //
+    // SYARAT AGAR INI JALAN:
+    // 1. Isi GOOGLE_API_KEY di bawah dengan API Key dari Google Cloud Console
+    //    (APIs & Services > Credentials > Create Credentials > API Key),
+    //    lalu aktifkan "Google Sheets API" di project itu.
+    // 2. Spreadsheet TARGET wajib di-share minimal "Siapa saja yang punya
+    //    link" sebagai Pelihat/Editor -- API Key publik cuma bisa MEMBACA
+    //    spreadsheet yang aksesnya publik, tidak bisa buka sheet privat.
+    // 3. Sebaiknya batasi API Key ini (HTTP referrer) ke domain web app Anda
+    //    di Google Cloud Console, karena key ini ikut ke-expose di browser.
+    //
+    // CATATAN PENTING: API Key cuma bisa MEMBACA. Ini TIDAK BISA dipakai
+    // untuk menguji apakah link benar² "editable" (itu perlu percobaan
+    // TULIS beneran, yang cuma bisa lewat backend Apps Script yang sudah
+    // Anda pakai untuk action "validate"/"update_bulk" -- bagian itu TETAP
+    // seperti semula, tidak diubah di sini).
+    // =======================================================
+    const GOOGLE_API_KEY = "GANTI_DENGAN_API_KEY_GOOGLE_CLOUD_ANDA";
+
+    let dropdownCache = {};
+
+    function extractSheetIdFromUrl(url) {
+        const match = String(url || '').match(/\/d\/([a-zA-Z0-9-_]+)/);
+        return match ? match[1] : null;
+    }
+
+    // Ambil isi 1 range mentah (dipakai kalau dropdown-nya bersumber dari
+    // range lain, bukan daftar manual langsung).
+    async function fetchRangeValuesPublic(sheetId, a1Range) {
+        const rangeParam = encodeURIComponent(a1Range);
+        const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${rangeParam}?key=${GOOGLE_API_KEY}`;
+        const res = await fetch(url, { cache: 'no-store' });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message || 'Gagal mengambil range sumber dropdown');
+        return (data.values || []).flat().filter(v => v !== undefined && v !== null && String(v).trim() !== '');
+    }
+
+    async function fetchColumnDropdown(sheetId, sheetName, colLetter) {
+        const cacheKey = `${sheetId}|${sheetName}|${colLetter}`;
+        if (dropdownCache[cacheKey]) return dropdownCache[cacheKey];
+
+        try {
+            const rangeRef = `${sheetName}!${colLetter}:${colLetter}`;
+            const fields = 'sheets.data.rowData.values.dataValidation';
+            const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?ranges=${encodeURIComponent(rangeRef)}&fields=${encodeURIComponent(fields)}&key=${GOOGLE_API_KEY}`;
+
+            const res = await fetch(url, { cache: 'no-store' });
+            const data = await res.json();
+
+            if (data.error) {
+                // Biasanya berarti: API Key belum diisi/salah, Sheets API belum
+                // aktif, atau spreadsheet-nya BELUM publik (masih private).
+                const result = { hasDropdown: false, options: [], error: true, reason: data.error.message };
+                dropdownCache[cacheKey] = result;
+                return result;
+            }
+
+            const rowData = (data.sheets && data.sheets[0] && data.sheets[0].data && data.sheets[0].data[0] && data.sheets[0].data[0].rowData) || [];
+
+            let options = [];
+            for (const row of rowData) {
+                const cell = row.values && row.values[0];
+                const cond = cell && cell.dataValidation && cell.dataValidation.condition;
+                if (!cond) continue;
+
+                if (cond.type === 'ONE_OF_LIST') {
+                    options = (cond.values || []).map(v => v.userEnteredValue);
+                } else if (cond.type === 'BOOLEAN') {
+                    options = (cond.values && cond.values.length >= 2)
+                        ? cond.values.map(v => v.userEnteredValue)
+                        : ['TRUE', 'FALSE'];
+                } else if (cond.type === 'ONE_OF_RANGE') {
+                    // Dropdown bersumber dari range lain, misal "=Sheet2!A1:A10"
+                    const rawRef = (cond.values && cond.values[0] && cond.values[0].userEnteredValue) || '';
+                    const cleanRef = rawRef.replace(/^=/, '');
+                    try { options = await fetchRangeValuesPublic(sheetId, cleanRef); } catch (e) { options = []; }
+                }
+                if (options.length > 0) break;
+            }
+
+            options = [...new Set(options.map(o => String(o)))];
+            const result = { hasDropdown: options.length > 0, options };
+            dropdownCache[cacheKey] = result;
+            return result;
+        } catch (e) {
+            return { hasDropdown: false, options: [], error: true };
+        }
+    }
+
+    // Cek ulang dropdown untuk 1 kolom konfigurasi tertentu, lalu simpan hasilnya
+    // ke state kolom itu sendiri supaya bisa dipakai saat renderConditionBlock().
+    async function refreshColumnDropdown(confIdx, colName) {
+        const conf = state[activeFileName] && state[activeFileName].configs[confIdx];
+        if (!conf) return;
+        const col = conf.columns.find(c => c.src === colName);
+        if (!col || !col.condition) return;
+
+        const linkData = globalLinks.find(l => l.id === conf.targetId);
+        if (!linkData || !conf.sheetName || !col.letter) return;
+
+        const sheetId = extractSheetIdFromUrl(linkData.url);
+        if (!sheetId) return;
+
+        col.condition.dropdownStatus = 'checking';
+        renderMappings();
+
+        const result = await fetchColumnDropdown(sheetId, conf.sheetName, col.letter);
+
+        // Guard: konfigurasi bisa saja berubah/dihapus selagi fetch berjalan
+        const stillConf = state[activeFileName] && state[activeFileName].configs[confIdx];
+        const stillCol = stillConf && stillConf.columns.find(c => c.src === colName);
+        if (!stillCol || !stillCol.condition) return;
+
+        if (result.error) {
+            stillCol.condition.dropdownStatus = 'error';
+        } else if (result.hasDropdown && result.options.length > 0) {
+            stillCol.condition.dropdownStatus = 'found';
+            stillCol.condition.dropdownOptions = result.options;
+        } else {
+            stillCol.condition.dropdownStatus = 'none';
+            stillCol.condition.dropdownOptions = [];
+        }
+        renderMappings();
+    }
+
+    function refreshAllDropdownsInConfig(confIdx) {
+        const conf = state[activeFileName] && state[activeFileName].configs[confIdx];
+        if (!conf) return;
+        conf.columns.forEach(c => { if (c.condition) refreshColumnDropdown(confIdx, c.src); });
+    }
+
     /* =======================================================
        LOGIKA JAVASCRIPT APP 1 (TIKTOK SCRAPER)
     ======================================================== */
@@ -359,6 +527,200 @@
         return `${String(dateObj.getDate()).padStart(2,'0')} ${BULAN_INDO[dateObj.getMonth()]} ${short ? String(dateObj.getFullYear()).substring(2) : dateObj.getFullYear()}`;
     }
 
+    // =======================================================
+    // DETEKSI DETAIL VIDEO TIKTOK LEWAT API DOWNLOADER (TIKWM)
+    // Dipakai supaya Apify cuma dipakai untuk mendata LINK + TANGGAL video
+    // (biar hemat kredit Apify), sedangkan judul/hashtag/statistik diambil
+    // dari API gratis yang sama dengan fitur download video.
+    // =======================================================
+
+    async function scrapeTikTokMeta(url, resolution = 'hd', fetchMedia = true, onProgress = null) {
+        if (!url) throw new Error("URL TikTok wajib diisi.");
+
+        const endpoint = `https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1`;
+        const res = await fetch(endpoint);
+        if (!res.ok) throw new Error("Gagal menghubungi server parser.");
+
+        const resJson = await res.json();
+        if (resJson.code !== 0 || !resJson.data) throw new Error(resJson.msg || "Video tidak ditemukan atau bersifat privat.");
+
+        const raw = resJson.data;
+
+        const rawHashtags = raw.title ? (raw.title.match(/#[\w\u0590-\u05ff]+/g) || []) : [];
+        const hashtagString = rawHashtags.join(' ');
+        const cleanTitle = raw.title ? raw.title.replace(/#[\w\u0590-\u05ff]+/g, '').replace(/[\r\n]+/g, ' ').trim() : "";
+
+        const videoUrl = (resolution === 'hd' && raw.hdplay) ? raw.hdplay : (raw.play || raw.wmplay);
+        const tiktokAudioUrl = raw.music || (raw.music_info && raw.music_info.play) || null;
+        const coverUrl = raw.origin_cover || raw.cover || raw.ai_dynamic_cover || raw.dynamic_cover || null;
+
+        let videoMedia = null, audioMedia = null;
+        if (fetchMedia) {
+            const downloadBlobStream = async (targetUrl, trackProgress) => {
+                if (!targetUrl) return null;
+                try {
+                    const response = await fetch(targetUrl);
+                    if (!response.ok) return null;
+                    const contentLength = response.headers.get("content-length");
+                    const total = parseInt(contentLength, 10);
+                    if (!total || isNaN(total) || !trackProgress) {
+                        if (trackProgress && onProgress) onProgress(50);
+                        const blob = await response.blob();
+                        if (trackProgress && onProgress) onProgress(100);
+                        return { blob, objectUrl: URL.createObjectURL(blob) };
+                    }
+                    const reader = response.body.getReader();
+                    let received = 0; const chunks = [];
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        chunks.push(value); received += value.length;
+                        if (onProgress) onProgress(Math.round((received / total) * 100));
+                    }
+                    const blob = new Blob(chunks);
+                    return { blob, objectUrl: URL.createObjectURL(blob) };
+                } catch (e) { return null; }
+            };
+            [videoMedia, audioMedia] = await Promise.all([
+                downloadBlobStream(videoUrl, true),
+                downloadBlobStream(tiktokAudioUrl, false)
+            ]);
+        }
+
+        return {
+            author: {
+                id: raw.author?.id, username: raw.author?.unique_id, nickname: raw.author?.nickname
+            },
+            title: cleanTitle || (raw.title || "").replace(/[\r\n]+/g, ' ').trim(),
+            hashtags: rawHashtags.map(t => t.replace('#', '')),
+            hashtagString: hashtagString,
+            createTime: raw.create_time || null,
+            cover: coverUrl,
+            stats: {
+                likes: raw.digg_count || 0, comments: raw.comment_count || 0, shares: raw.share_count || 0,
+                saves: raw.collect_count || 0, views: raw.play_count || 0
+            },
+            video: { url: videoUrl, objectUrl: (videoMedia && videoMedia.objectUrl) || videoUrl },
+            audio: {
+                tiktokMusic: { title: raw.music_info?.title || "TikTok Music Audio", objectUrl: (audioMedia && audioMedia.objectUrl) || tiktokAudioUrl }
+            }
+        };
+    }
+
+    // =======================================================
+    // UI KARTU "DOWNLOAD VIDEO TIKTOK" (STANDALONE)
+    // =======================================================
+    async function processTikTokDownload() {
+        const urlInput = panggilElementDariID('tkDlUrl');
+        const url = urlInput ? urlInput.value.trim() : '';
+        if (!url) return notif("Masukkan link video TikTok terlebih dahulu.");
+
+        const btn = panggilElementDariID('tkDlBtn');
+        const progBox = panggilElementDariID('tkDlProgress');
+        const progState = panggilElementDariID('tkDlProgressState');
+        const progPercent = panggilElementDariID('tkDlProgressPercent');
+        const progBar = panggilElementDariID('tkDlProgressBar');
+        const resultBox = panggilElementDariID('tkDlResult');
+
+        btn.disabled = true; innerTextSamaDengan(btn, "Memproses...");
+        ClassListTambah(progBox, 'show'); ClassListHapus(resultBox, 'show');
+        innerTextSamaDengan(progState, "Mengambil data video..."); innerTextSamaDengan(progPercent, "0%");
+        progBar.style.width = "0%";
+
+        try {
+            const resolution = panggilElementDariID('tkDlRes') ? panggilElementDariID('tkDlRes').value : 'hd';
+            const data = await scrapeTikTokMeta(url, resolution, true, (p) => {
+                innerTextSamaDengan(progState, "Mengunduh video...");
+                innerTextSamaDengan(progPercent, `${p}%`);
+                progBar.style.width = `${p}%`;
+            });
+            renderTikTokDownloadResult(data);
+            ClassListTambah(resultBox, 'show');
+            innerTextSamaDengan(progState, "Selesai!");
+            progBar.style.width = "100%";
+        } catch (e) {
+            notif(`Gagal: ${e.message}`);
+        } finally {
+            btn.disabled = false; innerTextSamaDengan(btn, "Proses Link");
+            setTimeout(() => ClassListHapus(progBox, 'show'), 1200);
+        }
+    }
+
+    function renderTikTokDownloadResult(data) {
+        const resultBox = panggilElementDariID('tkDlResult');
+        const username = escapeStr(data.author.username || '-');
+        innerHTMLSamaDengan(resultBox, `
+            <div class="tkdl-meta"><div class="tkdl-meta-content"><span class="tkdl-meta-label">Akun Kreator</span><span class="tkdl-meta-val">@${username}</span></div></div>
+            <div class="tkdl-meta"><div class="tkdl-meta-content"><span class="tkdl-meta-label">Judul / Caption</span><span class="tkdl-meta-val">${escapeStr(data.title || '-')}</span></div></div>
+            <div class="tkdl-meta"><div class="tkdl-meta-content"><span class="tkdl-meta-label">Hashtag</span><span class="tkdl-meta-val">${escapeStr(data.hashtagString || '-')}</span></div></div>
+            <div class="tkdl-stats-grid">
+                <div class="tkdl-stat-box"><span class="val">${data.stats.likes}</span><span class="label">Likes</span></div>
+                <div class="tkdl-stat-box"><span class="val">${data.stats.comments}</span><span class="label">Komen</span></div>
+                <div class="tkdl-stat-box"><span class="val">${data.stats.shares}</span><span class="label">Share</span></div>
+                <div class="tkdl-stat-box"><span class="val">${data.stats.saves}</span><span class="label">Save</span></div>
+            </div>
+            <video class="tkdl-video" controls playsinline src="${data.video.objectUrl || ''}"></video>
+            <div class="tkdl-btn-group"><a href="${data.video.objectUrl || '#'}" download="tiktok-${username}.mp4">Download Video MP4</a></div>
+            <div class="tkdl-audio-block">
+                <div class="tkdl-audio-header"><span>${escapeStr(data.audio.tiktokMusic.title || 'Audio Musik TikTok')}</span><a class="tkdl-btn-sm" href="${data.audio.tiktokMusic.objectUrl || ''}" download="tiktok-audio-${username}.mp3">Download</a></div>
+                <audio controls src="${data.audio.tiktokMusic.objectUrl || ''}"></audio>
+            </div>
+        `);
+        lucide.createIcons();
+    }
+
+    // Tombol unduh cepat per baris pada hasil pengambilan data (pakai link yang sudah ada).
+    async function quickDownloadItem(link, btn) {
+        if (!link) return notif("Link video tidak tersedia.");
+        const originalHTML = btn.innerHTML;
+        btn.disabled = true; innerHTMLSamaDengan(btn, '<i data-lucide="loader" class="spin"></i>'); lucide.createIcons();
+        try {
+            const data = await scrapeTikTokMeta(link, 'hd', true, null);
+            if (!data.video.objectUrl) throw new Error("Video tidak dapat diunduh.");
+            const a = document.createElement('a');
+            a.href = data.video.objectUrl;
+            a.download = `tiktok-${data.author.username || 'video'}-${Date.now()}.mp4`;
+            a.click();
+        } catch (e) {
+            notif(`Gagal mengunduh: ${e.message}`);
+        } finally {
+            btn.disabled = false; innerHTMLSamaDengan(btn, originalHTML); lucide.createIcons();
+        }
+    }
+
+    // Pratinjau video (klik thumbnail) untuk item hasil pengambilan data.
+    let currentPreviewObjectUrl = null;
+
+    async function openVideoPreview(link) {
+        if (!link) return;
+        const overlay = panggilElementDariID('videoPreviewOverlay');
+        const body = panggilElementDariID('videoPreviewBody');
+        if (!overlay || !body) return;
+
+        if (currentPreviewObjectUrl) { URL.revokeObjectURL(currentPreviewObjectUrl); currentPreviewObjectUrl = null; }
+        innerHTMLSamaDengan(body, '<i data-lucide="loader" class="spin"></i>');
+        lucide.createIcons();
+        ClassListTambah(overlay, 'show');
+
+        try {
+            const data = await scrapeTikTokMeta(link, 'hd', true, null);
+            if (!data.video.objectUrl) throw new Error("Video tidak dapat dimuat.");
+            if (data.video.objectUrl.startsWith('blob:')) currentPreviewObjectUrl = data.video.objectUrl;
+            innerHTMLSamaDengan(body, `<video controls autoplay playsinline src="${data.video.objectUrl}"></video>`);
+        } catch (e) {
+            innerHTMLSamaDengan(body, `<div class="vp-error">Gagal memuat pratinjau: ${escapeStr(e.message || 'Error tidak diketahui')}</div>`);
+        }
+    }
+
+    function closeVideoPreview(event) {
+        if (event && event.currentTarget !== event.target) return;
+        const overlay = panggilElementDariID('videoPreviewOverlay');
+        const body = panggilElementDariID('videoPreviewBody');
+        if (overlay) ClassListHapus(overlay, 'show');
+        if (body) innerHTMLSamaDengan(body, '');
+        if (currentPreviewObjectUrl) { URL.revokeObjectURL(currentPreviewObjectUrl); currentPreviewObjectUrl = null; }
+    }
+
     async function startScraping() {
         if(apifyTokens.length === 0) return notif("Aksi ditolak. Konfigurasi API Apify eror.");
 
@@ -383,26 +745,66 @@
             };
 
             try {
+                // Apify di sini HANYA dipakai untuk mendata daftar LINK video.
+                // Tanggal, judul, dan statistik semuanya dideteksi lewat API
+                // downloader (tikwm) di bawah -- bukan dari data Apify.
                 const items = await runApifyWithFallback(runInput);
                 sessionData[user] = { dates: dates, items: [], searchTerm: "" };
 
-                let idCount = 0;
+                const linkToItem = {};
+                const uniqueLinks = [];
                 items.forEach(item => {
-                    if(!item.createTimeISO) return;
-                    const d = new Date(item.createTimeISO);
-                    if(d >= dates.start && d <= dates.end) {
-                        const textMatch = item.text ? item.text.replace(/#\w+/g, '').trim() : "";
-                        const hashMatch = item.text ? (item.text.match(/#\w+/g) || []).join(" ") : "";
-                        
+                    if (!item.webVideoUrl || linkToItem[item.webVideoUrl]) return;
+                    linkToItem[item.webVideoUrl] = item;
+                    uniqueLinks.push(item.webVideoUrl);
+                });
+
+                let idCount = 0;
+                let processedCount = 0;
+                for (const link of uniqueLinks) {
+                    processedCount++;
+                    addLog(`Mendeteksi detail video ${processedCount}/${uniqueLinks.length} dari @${user}...`, "running");
+
+                    const rawItem = linkToItem[link];
+
+                    try {
+                        const meta = await scrapeTikTokMeta(link, 'hd', false, null);
+                        if (!meta.createTime) throw new Error("Tanggal video tidak terdeteksi dari API.");
+
+                        const d = new Date(meta.createTime * 1000);
+                        if (d < dates.start || d > dates.end) continue; // di luar rentang tanggal, lewati
+
+                        idCount++;
                         sessionData[user].items.push({
-                            id: `vid_${idCount++}`, tglObj: d, tglStr: formatTgl(d),
-                            title: textMatch, hashtags: hashMatch, link: item.webVideoUrl||"",
-                            views: item.playCount||0, likes: item.diggCount||0,
-                            komens: item.commentCount||0, shares: item.shareCount||0, saves: item.collectCount||0, 
+                            id: `vid_${idCount}`, tglObj: d, tglStr: formatTgl(d),
+                            title: meta.title, hashtags: meta.hashtagString, link: link, cover: meta.cover || null,
+                            views: meta.stats.views, likes: meta.stats.likes,
+                            komens: meta.stats.comments, shares: meta.stats.shares, saves: meta.stats.saves,
                             isTrashed: false, trashReason: "", isForceRestored: false, isMatched: false
                         });
+                    } catch (metaErr) {
+                        // API deteksi link gagal untuk video ini -> pakai data cadangan dari Apify
+                        // (termasuk tanggalnya) supaya data tidak hilang begitu saja.
+                        if (!rawItem || !rawItem.createTimeISO) continue;
+                        const d = new Date(rawItem.createTimeISO);
+                        if (d < dates.start || d > dates.end) continue;
+
+                        const textMatch = rawItem.text ? rawItem.text.replace(/#\w+/g, '').trim() : "";
+                        const hashMatch = rawItem.text ? (rawItem.text.match(/#\w+/g) || []).join(" ") : "";
+
+                        idCount++;
+                        sessionData[user].items.push({
+                            id: `vid_${idCount}`, tglObj: d, tglStr: formatTgl(d),
+                            title: textMatch, hashtags: hashMatch, link: link,
+                            cover: rawItem.covers?.default || rawItem.coverUrl || null,
+                            views: rawItem.playCount || 0, likes: rawItem.diggCount || 0,
+                            komens: rawItem.commentCount || 0, shares: rawItem.shareCount || 0, saves: rawItem.collectCount || 0,
+                            isTrashed: false, trashReason: "Deteksi detail via API gagal, memakai data cadangan", isForceRestored: false, isMatched: false
+                        });
                     }
-                });
+
+                    await new Promise(r => setTimeout(r, 150)); // jeda kecil biar tidak membanjiri API deteksi
+                }
 
                 sessionData[user].items.sort((a,b) => a.tglObj - b.tglObj);
                 sessionData[user].items.forEach((item, index) => { item.originalNo = index + 1; });
@@ -528,6 +930,8 @@
 
         innerTextSamaDengan(panggilElementDariID(`tab-act-${user}`), `Daftar Utama (${activeData.length})`);
         innerTextSamaDengan(panggilElementDariID(`tab-trh-${user}`), `Tong Sampah (${trashData.length})`);
+
+        lucide.createIcons();
     }
 
     function switchTab(user, target) {
@@ -547,7 +951,13 @@
         if(!items.length) return `<div style="padding: 20px; text-align:center; color: var(--ts-text-muted); font-size: 0.9rem;">Data kosong.</div>`;
         return items.map((item) => `
             <div class="data-item ${item.isMatched ? 'highlight-match' : ''} ${item.isForceRestored && isActiveTab ? 'manual-restored' : ''}">
-                <div style="flex:1; padding-right: 15px;">
+                <div class="data-thumb${item.link ? ' has-preview' : ''}" ${item.link ? `onclick="openVideoPreview('${escapeStr(item.link)}')"` : ''}>
+                    ${item.cover
+                        ? `<img src="${item.cover}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentElement.innerHTML='<i data-lucide=&quot;video-off&quot;></i>'; lucide.createIcons();">`
+                        : `<i data-lucide="video"></i>`}
+                    ${item.link ? `<div class="thumb-play-overlay"><i data-lucide="play"></i></div>` : ''}
+                </div>
+                <div class="data-body">
                     <div class="data-title">${item.displayNo}. ${item.title || "<i>(Blank Title)</i>"}</div>
                     <div class="data-meta">
                         Tanggal: <span class="stat-highlight">${item.tglStr}</span> | 
@@ -560,10 +970,11 @@
                         ${item.trashReason && !isActiveTab ? `<div class="reason-badge">${item.trashReason}</div>` : ''}
                     </div>
                 </div>
-                <div style="display: flex; align-items: center;">
+                <div class="data-actions">
+                    ${item.link && isActiveTab ? `<button class="icon-btn icon-btn-primary" title="Unduh Video" onclick="quickDownloadItem('${escapeStr(item.link)}', this)"><i data-lucide="download"></i></button>` : ''}
                     ${isActiveTab 
-                        ? `<button class="btn-danger-sm" onclick="manualTrash('${user}', '${item.id}')">Hapus</button>`
-                        : `<button class="btn-success" onclick="manualRestore('${user}', '${item.id}')">Pulihkan Data</button>`}
+                        ? `<button class="icon-btn icon-btn-danger" title="Hapus" onclick="manualTrash('${user}', '${item.id}')"><i data-lucide="trash-2"></i></button>`
+                        : `<button class="icon-btn icon-btn-success" title="Pulihkan Data" onclick="manualRestore('${user}', '${item.id}')"><i data-lucide="rotate-ccw"></i></button>`}
                 </div>
             </div>
         `).join('');
@@ -606,11 +1017,24 @@
         addLog(`Sukses memuat CSV: ${fileName}`, "success");
     }
 
+    // Selalu bungkus tiap kolom dengan tanda kutip supaya konten yang punya
+    // koma atau baris baru di dalamnya (misal caption TikTok) tidak bikin
+    // baris CSV "geser" saat dibaca ulang oleh parseCSVRobust().
+    function csvField(val) {
+        const s = (val === undefined || val === null) ? '' : String(val);
+        return `"${s.replace(/"/g, '""')}"`;
+    }
+
     function generateCSVString(items) {
-        let csv = "No,Tanggal Upload,Judul Konten,Hashtag,Link Konten,View,Like,Komen,Share,Save\n";
+        const header = ["No","Tanggal Upload","Judul Konten","Hashtag","Link Konten","View","Like","Komen","Share","Save"];
+        let csv = header.map(csvField).join(',') + "\r\n";
         items.sort((a, b) => a.originalNo - b.originalNo);
         items.forEach((item, i) => {
-            csv += `${i+1},${item.tglStr},"${item.title.replace(/"/g,'""')}","${item.hashtags}",${item.link},${item.views},${item.likes},${item.komens},${item.shares},${item.saves}\n`;
+            const rowVals = [
+                i + 1, item.tglStr, item.title, item.hashtags, item.link,
+                item.views, item.likes, item.komens, item.shares, item.saves
+            ];
+            csv += rowVals.map(csvField).join(',') + "\r\n";
         });
         return csv;
     }
@@ -650,6 +1074,65 @@
         input.value = ""; 
     }
 
+    // =======================================================
+    // PARSER CSV YANG SADAR TANDA KUTIP & BARIS BARU (RFC4180)
+    // Menggantikan parser regex per-baris lama yang gampang "geser"/salah
+    // kolom kalau ada teks (misal caption TikTok) yang mengandung koma
+    // atau baris baru di dalam tanda kutip. Ini akar masalah data yang
+    // tumpuk/geser saat datanya sudah banyak.
+    // =======================================================
+    function parseCSVRobust(content) {
+        const rows = [];
+        let row = [];
+        let field = '';
+        let inQuotes = false;
+        const len = content.length;
+        let i = 0;
+
+        while (i < len) {
+            const char = content[i];
+
+            if (inQuotes) {
+                if (char === '"') {
+                    if (content[i + 1] === '"') { field += '"'; i += 2; continue; }
+                    inQuotes = false; i++; continue;
+                }
+                field += char; i++; continue;
+            }
+
+            if (char === '"') { inQuotes = true; i++; continue; }
+            if (char === ',') { row.push(field); field = ''; i++; continue; }
+            if (char === '\r') { i++; continue; }
+            if (char === '\n') {
+                row.push(field); field = '';
+                rows.push(row); row = [];
+                i++; continue;
+            }
+            field += char; i++;
+        }
+
+        if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+
+        return rows
+            .map(r => r.map(c => (c || '').trim()))
+            .filter(r => !(r.length === 1 && r[0] === '') && !(r.length === 0));
+    }
+
+    // Mendeteksi apakah sebuah kolom cocok dijadikan tipe "dropdown boolean"
+    // (isinya cuma TRUE/FALSE) supaya bisa ditawarkan kondisi nilai di Langkah 3.
+    function detectColumnTypes(cleanHeaders, columnsData) {
+        const colTypes = {};
+        cleanHeaders.forEach(h => {
+            const vals = (columnsData[h] || []).filter(v => v !== undefined && v !== null && String(v).trim() !== '');
+            if (vals.length > 0 && vals.every(v => ['true', 'false'].includes(String(v).trim().toLowerCase()))) {
+                colTypes[h] = 'boolean';
+            } else {
+                colTypes[h] = 'text';
+            }
+        });
+        return colTypes;
+    }
+
     function processCSVFiles(filesArray) {
         filesArray.forEach(file => {
             if (!file.name.toLowerCase().endsWith('.csv')) {
@@ -674,25 +1157,8 @@
                     addLog(`Gagal: '${file.name}' terdeteksi sebagai file biner/bukan teks murni.`, "error");
                     return;
                 }
-                
-                let rowsData = [];
-                let linesRaw = rawContent.split(/\r?\n/);
-                
-                linesRaw.forEach(line => {
-                    if (!line || typeof line !== 'string' || line.trim() === "" || line.replace(/,/g, "").trim() === "") return;
-                    
-                    let matches = line.match(/(".*?"|[^",\n\r]+)(?=\s*,|\s*\n|\s*\r|$)|(?<=,|^)(?=,|$)/g);
-                    if (matches && Array.isArray(matches)) {
-                        let cleanCells = matches.map(cell => {
-                            let c = cell ? cell.trim() : "";
-                            if (c.startsWith('"') && c.endsWith('"')) {
-                                c = c.slice(1, -1);
-                            }
-                            return c.replace(/""/g, '"');
-                        });
-                        rowsData.push(cleanCells);
-                    }
-                });
+
+                let rowsData = parseCSVRobust(rawContent);
 
                 if(rowsData.length === 0) {
                     addLog(`Gagal: Tidak ada baris data yang bisa dibaca di '${file.name}'.`, "error");
@@ -743,6 +1209,8 @@
                     colLengths[h] = lastValidIndex;
                 });
 
+                const colTypes = detectColumnTypes(cleanHeaders, columnsData);
+
                 const cleanFileName = file.name.replace(/\.[^/.]+$/, "").replace(/["']/g, "").replace(/[_+\-=\[\]{}()]+/g, " ").replace(/\s+/g, " ").trim();
                 
                 const filePackage = [{
@@ -750,6 +1218,7 @@
                     rows: uniqueBodyRows.length, 
                     columns: cleanHeaders,
                     col_lengths: colLengths,
+                    col_types: colTypes,
                     raw_columns_matrix: columnsData
                 }];
 
@@ -768,7 +1237,7 @@
 
         newFiles.forEach(f => {
             if(!state[f.name]) {
-                state[f.name] = { configs: [], columns: f.columns, rows: f.rows, col_lengths: f.col_lengths, raw_columns_matrix: f.raw_columns_matrix };
+                state[f.name] = { configs: [], columns: f.columns, rows: f.rows, col_lengths: f.col_lengths, col_types: f.col_types || {}, raw_columns_matrix: f.raw_columns_matrix };
                 if(selector.options.length > 0 && selector.options[0].value === "") selector.remove(0);
 
                 const opt = document.createElement('option');
@@ -948,7 +1417,16 @@
             const resData = await fetchGSWithFallback(payload);
             
             if(resData && resData.status === "success") {
-                if (resData.permission === "VIEWER" || resData.access === "READ_ONLY") {
+                // Tidak cukup cuma percaya field "status: success" -- itu cuma berarti
+                // linknya KETEMU/terbaca. Untuk memastikan linknya benar² BISA DIEDIT
+                // (bukan cuma "Anyone with link can VIEW"), backend wajib mencoba
+                // operasi tulis nyata ke spreadsheet dan melaporkan hasilnya lewat
+                // salah satu field ini: permission, access, atau canEdit.
+                const belumBisaEdit = resData.permission === "VIEWER" 
+                    || resData.access === "READ_ONLY" 
+                    || resData.canEdit === false;
+
+                if (belumBisaEdit) {
                     linkVerified(contextId, 'warning', 'Akses Edit Belum Disetujui (Mode Pelihat)', url, []);
                 } else {
                     linkVerified(contextId, 'success', resData.title || "Spreadsheet Tanpa Judul", url, resData.sheets || []);
@@ -1108,13 +1586,36 @@
     function updateGlobalRow(confIdx, val) {
         let cleanRow = parseInt(val) || 1;
         if(cleanRow < 1) cleanRow = 1;
-        
-        state[activeFileName].configs[confIdx].globalStartRow = cleanRow;
-        state[activeFileName].configs[confIdx].columns.forEach(c => {
-            c.row = cleanRow;
+
+        const fileData = state[activeFileName];
+        const conf = fileData.configs[confIdx];
+        conf.globalStartRow = cleanRow;
+        conf.columns.forEach(c => { c.row = cleanRow; });
+
+        // PENTING: jangan panggil renderMappings() di sini. renderMappings()
+        // menghancurkan & membangun ulang seluruh input di layar setiap kali
+        // dipanggil, jadi kalau dipanggil per-ketikan (oninput) input ini akan
+        // kehilangan fokus/kursor setiap huruf/angka diketik -- itulah sebabnya
+        // ngetik jadi "kayak ngecek-ngecek terus" dan susah. Cukup update
+        // label & input yang sudah ada di DOM secara langsung.
+        (fileData.columns || []).forEach((col, colIdx) => {
+            const existing = conf.columns.find(c => c.src === col);
+            if (!existing) return;
+
+            const rowInput = panggilElementDariID(`inp_row_${confIdx}_${colIdx}`);
+            if (rowInput) rowInput.value = cleanRow;
+
+            const letterEl = panggilElementDariID(`sel_let_${confIdx}_${colIdx}`);
+            const letter = letterEl ? letterEl.value : existing.letter;
+            const count = parseInt(existing.count) || 1;
+            const endRow = cleanRow + count - 1;
+
+            const lblStart = panggilElementDariID(`lbl_start_${confIdx}_${colIdx}`);
+            const lblEnd = panggilElementDariID(`lbl_end_${confIdx}_${colIdx}`);
+            if (lblStart) innerTextSamaDengan(lblStart, letter + cleanRow);
+            if (lblEnd) innerTextSamaDengan(lblEnd, letter + endRow);
         });
-        
-        renderMappings();
+
         validate();
     }
 
@@ -1219,7 +1720,7 @@
                                 const existing = conf.columns.find(c => c.src === col);
                                 const isChecked = !!existing;
 
-                                const colMaxRows = Math.max(1, fileData.col_lengths[col] || 0);
+                                const colMaxRows = Math.max(1, (fileData.col_lengths && fileData.col_lengths[col]) || 0);
                                 
                                 let defaultCount = (existing && existing.count !== undefined) ? existing.count : colMaxRows;
                                 let existingRow = existing ? existing.row : 1;
@@ -1265,6 +1766,7 @@
                                                 <div class="bg-slate-900 border border-slate-800/50 rounded py-0.5 text-slate-500">Akhir: <span id="lbl_end_${confIdx}_${colIdx}" class="text-emerald-400 font-medium">${existingLetter}${endRow}</span></div>
                                             </div>
                                         </div>
+                                        ${fileData.col_types && fileData.col_types[col] === 'boolean' && existing ? renderConditionBlock(confIdx, colIdx, safeColStr, existing) : ''}
                                     </div>
                                 </div>`;
                             }).join('')}
@@ -1273,7 +1775,8 @@
                 `);
                 container.appendChild(div);
             } catch (e) {
-                addLog("Terjadi kendala memuat tampilan.", "error");
+                console.error("renderMappings error:", e);
+                addLog("Terjadi kendala memuat tampilan. Cek console (F12) untuk detail.", "error");
             }
         });
 
@@ -1298,6 +1801,138 @@
         return options;
     }
 
+    // =======================================================
+    // KONDISI NILAI UNTUK KOLOM BERTIPE BOOLEAN (TRUE/FALSE)
+    // Kolom apapun yang isinya cuma TRUE/FALSE (misal kolom status ya/tidak) otomatis
+    // dianggap seperti dropdown: nilainya bisa diganti massal ke label lain,
+    // atau diatur satu per satu per baris.
+    // =======================================================
+    const CONDITION_PRESETS = {
+        raw:        { trueLabel: 'TRUE', falseLabel: 'FALSE', label: 'Apa Adanya (TRUE/FALSE)' },
+        ada_tidak:  { trueLabel: 'Ada',  falseLabel: 'Tidak Ada', label: 'Ada / Tidak Ada' },
+        ya_tidak:   { trueLabel: 'Ya',   falseLabel: 'Tidak', label: 'Ya / Tidak' },
+        custom:     { label: 'Kustom...' }
+    };
+
+    function renderConditionBlock(confIdx, colIdx, safeColStr, existing) {
+        if (!existing) return '';
+        const cond = existing.condition || { preset: 'raw', trueLabel: 'TRUE', falseLabel: 'FALSE', mode: 'bulk', overrides: {}, dropdownStatus: 'idle', dropdownOptions: [] };
+        const preset = cond.preset || 'raw';
+        const isPerRow = cond.mode === 'per_row';
+        const dStatus = cond.dropdownStatus || 'idle';
+        const dOptions = cond.dropdownOptions || [];
+        const hasRealDropdown = dStatus === 'found' && dOptions.length > 0;
+
+        // Kontrol label TRUE/FALSE: kalau spreadsheet tujuan terbukti punya
+        // dropdown asli, tampilkan sebagai <select> berisi pilihan ASLI dari
+        // spreadsheet (bukan cuma tebakan). Kalau tidak ada, jatuh ke input
+        // teks manual seperti sebelumnya.
+        const labelControl = (labelKey, currentVal) => {
+            if (hasRealDropdown) {
+                return `<select onchange="updateConditionLabel(${confIdx}, '${safeColStr}', '${labelKey}', this.value)" class="bg-slate-900 border border-slate-800 text-[10px] rounded px-1.5 py-1 outline-none text-slate-200 w-full appearance-none">
+                    ${dOptions.map(o => `<option value="${escapeStr(o)}" ${o === currentVal ? 'selected' : ''}>${escapeStr(o)}</option>`).join('')}
+                </select>`;
+            }
+            return `<input type="text" value="${escapeStr(currentVal || '')}" placeholder="Label jika ${labelKey === 'trueLabel' ? 'TRUE' : 'FALSE'}" oninput="updateConditionLabel(${confIdx}, '${safeColStr}', '${labelKey}', this.value)" class="bg-slate-900 border border-slate-800 text-[10px] rounded px-1.5 py-1 outline-none text-slate-200">`;
+        };
+
+        let statusHTML = '';
+        if (dStatus === 'checking') {
+            statusHTML = `<span class="text-[9px] text-amber-400 flex items-center gap-1"><i data-lucide="loader" class="w-3 h-3 animate-spin"></i>Memeriksa dropdown di spreadsheet...</span>`;
+        } else if (dStatus === 'found') {
+            statusHTML = `<span class="text-[9px] text-emerald-400 flex items-center gap-1"><i data-lucide="check" class="w-3 h-3"></i>Dropdown terdeteksi (${dOptions.length} pilihan) dari spreadsheet.</span>`;
+        } else if (dStatus === 'error') {
+            statusHTML = `<span class="text-[9px] text-rose-400">Gagal cek dropdown (API Key belum diisi/valid, atau spreadsheet belum publik), memakai label manual.</span>`;
+        } else if (dStatus === 'none') {
+            statusHTML = `<span class="text-[9px] text-slate-500">Kolom tujuan tidak punya dropdown, memakai label manual.</span>`;
+        }
+
+        let rowsHTML = '';
+        if (isPerRow) {
+            const rawVals = (state[activeFileName].raw_columns_matrix[existing.src] || []).slice(0, parseInt(existing.count) || 0);
+            rowsHTML = `
+                <div class="mt-2 max-h-[160px] overflow-y-auto custom-scroll flex flex-col gap-1 bg-slate-900 border border-slate-800 rounded p-1.5">
+                    ${rawVals.map((raw, idx) => {
+                        const rawLower = String(raw || '').trim().toLowerCase();
+                        const defaultLabel = rawLower === 'true' ? (cond.trueLabel || 'TRUE') : (rawLower === 'false' ? (cond.falseLabel || 'FALSE') : raw);
+                        const overrideVal = (cond.overrides && cond.overrides[idx] !== undefined) ? cond.overrides[idx] : '';
+                        const overrideControl = hasRealDropdown
+                            ? `<select onchange="updateConditionOverride(${confIdx}, '${safeColStr}', ${idx}, this.value)" class="flex-1 bg-slate-950 border border-slate-800 text-[10px] rounded px-1.5 py-0.5 outline-none text-slate-200 appearance-none">
+                                  <option value="">(pakai label bulk: ${escapeStr(defaultLabel)})</option>
+                                  ${dOptions.map(o => `<option value="${escapeStr(o)}" ${overrideVal === o ? 'selected' : ''}>${escapeStr(o)}</option>`).join('')}
+                               </select>`
+                            : `<input type="text" value="${escapeStr(overrideVal)}" placeholder="${escapeStr(defaultLabel)}" oninput="updateConditionOverride(${confIdx}, '${safeColStr}', ${idx}, this.value)" class="flex-1 bg-slate-950 border border-slate-800 text-[10px] rounded px-1.5 py-0.5 outline-none text-slate-200">`;
+                        return `
+                        <div class="flex items-center gap-1.5">
+                            <span class="text-[9px] font-mono text-slate-500 w-6 shrink-0">#${idx + 1}</span>
+                            <span class="text-[9px] font-mono text-slate-500 w-10 shrink-0 truncate" title="${escapeStr(raw)}">${escapeStr(String(raw))}</span>
+                            ${overrideControl}
+                        </div>`;
+                    }).join('')}
+                </div>
+                <span class="text-[9px] text-slate-500">Kosongkan untuk memakai label bulk di atas.</span>
+            `;
+        }
+
+        return `
+        <div class="flex flex-col gap-1.5 bg-slate-950 p-2 rounded border border-slate-800/60 mt-1">
+            <div class="flex items-center justify-between">
+                <span class="text-[9px] font-bold text-slate-500 uppercase tracking-wider">Kondisi Nilai (TRUE / FALSE)</span>
+                <button type="button" onclick="refreshColumnDropdown(${confIdx}, '${safeColStr}')" class="text-[9px] text-indigo-400 hover:text-indigo-300 underline shrink-0">Cek Dropdown</button>
+            </div>
+            ${statusHTML}
+            ${!hasRealDropdown ? `
+            <select onchange="updateConditionPreset(${confIdx}, '${safeColStr}', this.value)" class="bg-slate-900 text-slate-300 text-[11px] border border-slate-800 rounded p-1 outline-none appearance-none">
+                ${Object.keys(CONDITION_PRESETS).map(k => `<option value="${k}" ${preset === k ? 'selected' : ''}>${CONDITION_PRESETS[k].label}</option>`).join('')}
+            </select>` : ''}
+            <div class="grid grid-cols-2 gap-2">
+                ${labelControl('trueLabel', cond.trueLabel)}
+                ${labelControl('falseLabel', cond.falseLabel)}
+            </div>
+            <button type="button" onclick="togglePerRowCondition(${confIdx}, '${safeColStr}')" class="text-[10px] text-indigo-400 hover:text-indigo-300 underline text-left">
+                ${isPerRow ? 'Tutup pengaturan per baris' : 'Atur per baris (override manual)'}
+            </button>
+            ${rowsHTML}
+        </div>`;
+    }
+
+    function updateConditionPreset(confIdx, colName, preset) {
+        const col = state[activeFileName].configs[confIdx].columns.find(c => c.src === colName);
+        if (!col) return;
+        if (!col.condition) col.condition = { mode: 'bulk', overrides: {} };
+        col.condition.preset = preset;
+        if (preset !== 'custom') {
+            col.condition.trueLabel = CONDITION_PRESETS[preset].trueLabel;
+            col.condition.falseLabel = CONDITION_PRESETS[preset].falseLabel;
+        }
+        renderMappings();
+        validate();
+    }
+
+    function updateConditionLabel(confIdx, colName, key, val) {
+        const col = state[activeFileName].configs[confIdx].columns.find(c => c.src === colName);
+        if (!col || !col.condition) return;
+        // Update state saja tanpa renderMappings() supaya ngetik label kustom tetap lancar.
+        col.condition[key] = val;
+    }
+
+    function togglePerRowCondition(confIdx, colName) {
+        const col = state[activeFileName].configs[confIdx].columns.find(c => c.src === colName);
+        if (!col) return;
+        if (!col.condition) col.condition = { preset: 'raw', trueLabel: 'TRUE', falseLabel: 'FALSE', mode: 'bulk', overrides: {} };
+        col.condition.mode = col.condition.mode === 'per_row' ? 'bulk' : 'per_row';
+        renderMappings();
+    }
+
+    function updateConditionOverride(confIdx, colName, idx, val) {
+        const col = state[activeFileName].configs[confIdx].columns.find(c => c.src === colName);
+        if (!col || !col.condition) return;
+        if (!col.condition.overrides) col.condition.overrides = {};
+        // Update state saja tanpa renderMappings() supaya ngetik override per baris tetap lancar.
+        if (val === '') { delete col.condition.overrides[idx]; }
+        else { col.condition.overrides[idx] = val; }
+    }
+
     function toggleCol(confIdx, colName, checked) {
         let conf = state[activeFileName].configs[confIdx];
         
@@ -1309,13 +1944,28 @@
             }
             const colMaxRows = Math.max(1, state[activeFileName].col_lengths[colName] || 0);
             const initRow = conf.rowMode === 'global' ? parseInt(conf.globalStartRow || 1) : 1;
-            
-            conf.columns.push({src: colName, letter: assignedLetter, row: initRow, count: colMaxRows});
+
+            const newCol = {src: colName, letter: assignedLetter, row: initRow, count: colMaxRows};
+
+            // Kolom yang isinya cuma TRUE/FALSE (misal kolom status ya/tidak) otomatis dapat
+            // opsi kondisi nilai / dropdown.
+            if (state[activeFileName].col_types && state[activeFileName].col_types[colName] === 'boolean') {
+                newCol.condition = { preset: 'raw', trueLabel: 'TRUE', falseLabel: 'FALSE', mode: 'bulk', overrides: {}, dropdownStatus: 'idle', dropdownOptions: [] };
+            }
+
+            conf.columns.push(newCol);
         } else {
             conf.columns = conf.columns.filter(c => c.src !== colName);
         }
         renderMappings();
         validate();
+
+        // Begitu kolom boolean dicentang, langsung cek apakah kolom tujuan di
+        // spreadsheet punya dropdown asli supaya labelnya akurat.
+        if (checked) {
+            const addedCol = conf.columns.find(c => c.src === colName);
+            if (addedCol && addedCol.condition) refreshColumnDropdown(confIdx, colName);
+        }
     }
 
     function updateTargetUrl(idx, id) {
@@ -1324,10 +1974,12 @@
         state[activeFileName].configs[idx].sheetName = linkObj && linkObj.sheets.length > 0 ? linkObj.sheets[0] : '';
         renderMappings();
         validate();
+        refreshAllDropdownsInConfig(idx);
     }
 
     function updateSheetName(idx, sheetName) {
         state[activeFileName].configs[idx].sheetName = sheetName;
+        refreshAllDropdownsInConfig(idx);
     }
 
     function adjustCount(confIdx, colName, colIdx, delta, maxRows) {
@@ -1365,6 +2017,12 @@
             } catch(e) {}
         }
         validate();
+
+        // Huruf kolom tujuan berubah -> kolom fisik di spreadsheet berbeda,
+        // jadi dropdown-nya perlu dicek ulang.
+        if (key === 'letter' && col && col.condition) {
+            refreshColumnDropdown(confIdx, colName);
+        }
     }
 
     function validate() {
@@ -1402,6 +2060,17 @@
         lucide.createIcons();
         btn.disabled = true;
 
+        try {
+            await submitDataInner();
+        } finally {
+            // Selalu kembalikan tombol ke kondisi normal, baik sukses, gagal, maupun error,
+            // supaya teks & ikon loading tidak berputar terus-menerus.
+            validate();
+            lucide.createIcons();
+        }
+    }
+
+    async function submitDataInner() {
         addLog("Mengompilasi paket data massal...", "running");
         const bulkPackets = [];
         const seenConfigs = new Set();
@@ -1428,6 +2097,18 @@
                             
                             let fullColumnArray = (state[fName].raw_columns_matrix && state[fName].raw_columns_matrix[c.src]) ? state[fName].raw_columns_matrix[c.src] : [];
                             let slicedData = fullColumnArray.slice(0, parseInt(c.count || 0));
+
+                            // Terapkan kondisi nilai TRUE/FALSE (dropdown) jika kolom ini dikonfigurasi.
+                            if (c.condition) {
+                                slicedData = slicedData.map((val, idx) => {
+                                    const rawLower = String(val || '').trim().toLowerCase();
+                                    if (rawLower !== 'true' && rawLower !== 'false') return val; // biarkan nilai non-boolean apa adanya
+                                    if (c.condition.mode === 'per_row' && c.condition.overrides && c.condition.overrides[idx] !== undefined && c.condition.overrides[idx] !== '') {
+                                        return c.condition.overrides[idx];
+                                    }
+                                    return rawLower === 'true' ? (c.condition.trueLabel || 'TRUE') : (c.condition.falseLabel || 'FALSE');
+                                });
+                            }
 
                             bulkPackets.push({
                                 url: linkData.url,
@@ -1530,6 +2211,8 @@
         if (startBtn) {
             startBtn.disabled = true; 
         }
-        
-        loadConfigLoop();
+
+        // Tab "Download TikTok" aktif duluan & tidak butuh API Apify/Google Sheets
+        // sama sekali (dia pakai API tikwm langsung). Cek status API (loadConfigLoop)
+        // baru dijalankan saat tab "Laporan" pertama kali dibuka, lihat switchMainTab().
     };

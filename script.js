@@ -262,6 +262,8 @@
     }
 
     // Fungsi Jembatan Eksekutor API Apify (Fallback Support)
+    // Dataset hasil sekarang diambil BERHALAMAN (limit/offset) supaya semua
+    // item terbaca, tidak berhenti di jumlah default satu request.
     async function runApifyWithFallback(runInput) {
         if(apifyTokens.length === 0) throw new Error("Proses dihentikan. API Eror!");
         
@@ -274,7 +276,11 @@
                 const runRes = await fetch(`https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${token}`, {
                     method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(runInput)
                 });
-                if (!runRes.ok) throw new Error("API Eror!");
+                if (!runRes.ok) {
+                    // 400 = input ditolak actor (bukan salah token), jangan ganti token.
+                    if (runRes.status === 400) { const be = new Error("Input ditolak Apify (400)"); be.badInput = true; throw be; }
+                    throw new Error("API Eror!");
+                }
                 
                 const runData = await runRes.json();
                 let datasetId;
@@ -283,15 +289,33 @@
                     const statusRes = await fetch(`https://api.apify.com/v2/actor-runs/${runData.data.id}?token=${token}`);
                     const statusData = await statusRes.json();
                     if(statusData.data.status === 'SUCCEEDED') { datasetId = statusData.data.defaultDatasetId; break; }
-                    if(['FAILED','ABORTED'].includes(statusData.data.status)) throw new Error("Run Failed in Server");
+                    if(['FAILED','ABORTED','TIMED-OUT'].includes(statusData.data.status)) throw new Error("Run Failed in Server");
                     await new Promise(r => setTimeout(r, 5000));
                 }
 
-                const dataRes = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${token}`);
-                const items = await dataRes.json();
+                const items = [];
+                const PAGE = 1000;
+                let offset = 0;
+                while (true) {
+                    let batch = null;
+                    for (let t = 0; t < 3 && batch === null; t++) {
+                        const dataRes = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${token}&format=json&limit=${PAGE}&offset=${offset}`);
+                        if (dataRes.ok) {
+                            const parsed = await dataRes.json();
+                            if (Array.isArray(parsed)) batch = parsed;
+                        }
+                        if (batch === null) await new Promise(r => setTimeout(r, 2000));
+                    }
+                    if (batch === null) throw new Error("API Eror!");
+                    if (batch.length === 0) break;
+                    items.push(...batch);
+                    if (batch.length < PAGE) break;
+                    offset += batch.length;
+                }
                 return items; 
                 
             } catch(e) {
+                if (e && e.badInput) throw e;
                 Log(`Mengambil Data...`);
                 currentApifyIndex++;
                 attempts++;
@@ -588,6 +612,7 @@
         }
 
         return {
+            id: raw.id || raw.aweme_id || null,
             author: {
                 id: raw.author?.id, username: raw.author?.unique_id, nickname: raw.author?.nickname
             },
@@ -721,6 +746,123 @@
         if (currentPreviewObjectUrl) { URL.revokeObjectURL(currentPreviewObjectUrl); currentPreviewObjectUrl = null; }
     }
 
+    /* =======================================================
+       PENGAMBILAN SEMUA DATA (TIDAK MENTOK 100)
+       Apify dipanggil per "jendela tanggal". Kalau satu jendela hasilnya
+       penuh (kena batas per-run), jendela dipecah dua dan diambil lagi,
+       terus begitu sampai semua video di rentang tanggal terambil.
+    ======================================================== */
+    const APIFY_PAGE_CAP = 1000;
+    let tikwmDelayMs = 150;
+
+    function sleepMs(ms) { return new Promise(r => setTimeout(r, ms)); }
+    function escHtml(str) {
+        return String(str === undefined || str === null ? '' : str)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function utcDayStr(d) { return d.toISOString().split('T')[0]; }
+    function shiftDayStr(str, n) {
+        const d = new Date(str + 'T00:00:00Z');
+        d.setUTCDate(d.getUTCDate() + n);
+        return d.toISOString().split('T')[0];
+    }
+    function diffDays(a, b) {
+        return Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000);
+    }
+
+    // Kunci unik video (ID di URL), dipakai buat cegah data dobel.
+    function videoKey(link) {
+        const l = String(link || '').trim();
+        if (!l) return '';
+        const m = l.match(/\/video\/(\d+)/);
+        if (m) return 'id:' + m[1];
+        return l.split('?')[0].replace(/\/+$/, '').toLowerCase();
+    }
+
+    // Kunci isi konten: judul + hashtag + tanggal, tidak peduli huruf besar/kecil,
+    // spasi ganda, tanda baca, simbol #, atau urutan hashtag. Judul kosong tidak dianggap sama.
+    function normText(t) {
+        return String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    }
+    function contentKey(item) {
+        const title = normText(item.title);
+        if (!title) return '';
+        const tags = String(item.hashtags || '').split(/\s+/).map(normText).filter(Boolean).sort().join(',');
+        let day = '';
+        if (item.tglObj) { const d = item.tglObj; day = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`; }
+        return `${title}|${tags}|${day}`;
+    }
+    function isDupItem(list, cand) {
+        const vk = videoKey(cand.link);
+        const ck = contentKey(cand);
+        return list.some(x => (vk && videoKey(x.link) === vk) || (ck && contentKey(x) === ck));
+    }
+    function dedupeItems(list) {
+        const out = [];
+        list.forEach(it => { if (!isDupItem(out, it)) out.push(it); });
+        return out;
+    }
+
+    async function fetchApifyRangeAll(user, s, e, st) {
+        const runInput = {
+            "profiles": [user], "resultsPerPage": st.cap, "profileScrapeSections": ["videos"], "profileSorting": "oldest",
+            "excludePinnedPosts": true, "newestPostDate": e, "oldestPostDateUnified": s
+        };
+
+        let items;
+        try {
+            items = await runApifyWithFallback(runInput);
+        } catch (err) {
+            // Kalau actor menolak batas besar, turunkan ke 100 dan lanjut (jendela akan dipecah lebih sering).
+            if (err && err.badInput && st.cap > 100) { st.cap = 100; return fetchApifyRangeAll(user, s, e, st); }
+            throw err;
+        }
+
+        const saturated = items.length >= Math.floor(st.cap * 0.9);
+        if (!saturated) return items;
+
+        const span = diffDays(s, e);
+        if (span < 1) { st.warnSaturated = true; return items; } // 1 hari penuh, tidak bisa dipecah lagi
+
+        const mid = shiftDayStr(s, Math.floor(span / 2));
+        addLog(`Data @${user} banyak, memecah rentang ${s} s/d ${e} supaya semua terambil...`, "running");
+        const left = await fetchApifyRangeAll(user, s, mid, st);
+        const right = await fetchApifyRangeAll(user, shiftDayStr(mid, 1), e, st);
+        return left.concat(right);
+    }
+
+    // Deteksi detail video lewat API downloader (tikwm) dengan retry kalau kena limit/jaringan.
+    async function detectMetaRetry(link, tries = 3) {
+        let lastErr;
+        for (let t = 0; t < tries; t++) {
+            try {
+                return await scrapeTikTokMeta(link, 'hd', false, null);
+            } catch (e) {
+                lastErr = e;
+                const msg = String((e && e.message) || '').toLowerCase();
+                const isLimit = msg.includes('limit') || msg.includes('frequen');
+                const retryable = isLimit || msg.includes('server parser') || msg.includes('failed to fetch') || msg.includes('network');
+                if (isLimit) tikwmDelayMs = 1100; // pelan-pelan supaya tidak kena limit lagi
+                if (!retryable || t === tries - 1) break;
+                await sleepMs(1200 * (t + 1));
+            }
+        }
+        throw lastErr;
+    }
+
+    function sortAndNumberItems(sd) {
+        sd.items.sort((a, b) => {
+            const ta = a.tglObj ? a.tglObj.getTime() : null;
+            const tb = b.tglObj ? b.tglObj.getTime() : null;
+            if (ta === null && tb === null) return 0;
+            if (ta === null) return 1;
+            if (tb === null) return -1;
+            return ta - tb;
+        });
+        sd.items.forEach((item, index) => { item.originalNo = index + 1; });
+    }
+
     async function startScraping() {
         if(apifyTokens.length === 0) return notif("Aksi ditolak. Konfigurasi API Apify eror.");
 
@@ -731,25 +873,24 @@
         btn.disabled = true;
         innerTextSamaDengan(btn, "Memproses...");
 
-        innerHTMLSamaDengan(panggilElementDariID('resultsArea'), "");
-        sessionData = {}; 
-        
+        // Daftar yang sudah ada TIDAK dihapus; hanya daftar username yang diambil ulang yang diperbarui.
         let dates;
         try { dates = getSelectedDates(); } catch (e) { btn.disabled = false; innerTextSamaDengan(btn, "Ambil Data"); return notif(e.message); }
 
+        tikwmDelayMs = 150;
+
         for (const user of usernames) {
             addLog(`Memproses Data @${user}...`, "running");
-            const runInput = {
-                "profiles": [user], "resultsPerPage": 100, "profileScrapeSections": ["videos"], "profileSorting": "oldest",
-                "excludePinnedPosts": true, "newestPostDate": dates.end.toISOString().split('T')[0], "oldestPostDateUnified": dates.start.toISOString().split('T')[0]
-            };
 
             try {
                 // Apify di sini HANYA dipakai untuk mendata daftar LINK video.
                 // Tanggal, judul, dan statistik semuanya dideteksi lewat API
                 // downloader (tikwm) di bawah -- bukan dari data Apify.
-                const items = await runApifyWithFallback(runInput);
-                sessionData[user] = { dates: dates, items: [], searchTerm: "" };
+                const st = { cap: APIFY_PAGE_CAP, warnSaturated: false };
+                const items = await fetchApifyRangeAll(user, utcDayStr(dates.start), utcDayStr(dates.end), st);
+
+                const prevManual = ((sessionData[user] && sessionData[user].items) || []).filter(i => i.isManual);
+                const newSd = { dates: dates, items: [], searchTerm: "" };
 
                 const linkToItem = {};
                 const uniqueLinks = [];
@@ -768,14 +909,14 @@
                     const rawItem = linkToItem[link];
 
                     try {
-                        const meta = await scrapeTikTokMeta(link, 'hd', false, null);
+                        const meta = await detectMetaRetry(link);
                         if (!meta.createTime) throw new Error("Tanggal video tidak terdeteksi dari API.");
 
                         const d = new Date(meta.createTime * 1000);
                         if (d < dates.start || d > dates.end) continue; // di luar rentang tanggal, lewati
 
                         idCount++;
-                        sessionData[user].items.push({
+                        newSd.items.push({
                             id: `vid_${idCount}`, tglObj: d, tglStr: formatTgl(d),
                             title: meta.title, hashtags: meta.hashtagString, link: link, cover: meta.cover || null,
                             views: meta.stats.views, likes: meta.stats.likes,
@@ -793,7 +934,7 @@
                         const hashMatch = rawItem.text ? (rawItem.text.match(/#\w+/g) || []).join(" ") : "";
 
                         idCount++;
-                        sessionData[user].items.push({
+                        newSd.items.push({
                             id: `vid_${idCount}`, tglObj: d, tglStr: formatTgl(d),
                             title: textMatch, hashtags: hashMatch, link: link,
                             cover: rawItem.covers?.default || rawItem.coverUrl || null,
@@ -803,13 +944,22 @@
                         });
                     }
 
-                    await new Promise(r => setTimeout(r, 150)); // jeda kecil biar tidak membanjiri API deteksi
+                    await sleepMs(tikwmDelayMs); // jeda kecil biar tidak membanjiri API deteksi
                 }
 
-                sessionData[user].items.sort((a,b) => a.tglObj - b.tglObj);
-                sessionData[user].items.forEach((item, index) => { item.originalNo = index + 1; });
+                // Data yang ditambahkan manual (link/CSV) di daftar ini tetap dipertahankan.
+                const beforeDedupe = newSd.items.length;
+                newSd.items = dedupeItems(newSd.items);
+                const removedDup = beforeDedupe - newSd.items.length;
+                prevManual.forEach(m => {
+                    if (isDupItem(newSd.items, m)) return;
+                    newSd.items.push(m);
+                });
 
-                addLog(`Berhasil memuat ${sessionData[user].items.length} data dari @${user}`, "success");
+                sessionData[user] = newSd;
+                sortAndNumberItems(newSd);
+
+                addLog(`Berhasil memuat ${newSd.items.length} data dari @${user}` + (removedDup ? ` (${removedDup} data dobel dibuang)` : "") + (st.warnSaturated ? " (ada hari dengan data sangat banyak, kemungkinan belum lengkap)" : ""), "success");
                 renderUI(user);
 
             } catch(e) { addLog(`Error ambil data @${user}: ${e.message}`, "error"); }
@@ -843,21 +993,39 @@
         let div = panggilElementDariID(`container-${user}`);
         if(!div) {
             div = document.createElement('div'); div.id = `container-${user}`; div.className = 'ts-card';
-            resArea.appendChild(div);
+            // Kartu daftar manual selalu di paling bawah; kartu akun baru disisipkan di atasnya.
+            const manualDiv = (user !== MANUAL_KEY) ? panggilElementDariID(`container-${MANUAL_KEY}`) : null;
+            if (manualDiv && manualDiv.parentNode === resArea) resArea.insertBefore(div, manualDiv);
+            else resArea.appendChild(div);
         }
+
+        const prevTrashTab = panggilElementDariID(`tab-trh-${user}`);
+        const wasTrashActive = !!(prevTrashTab && prevTrashTab.classList.contains('active'));
 
         let searchBoxHTML = "";
         if (sd.items.length > 6) {
             searchBoxHTML = `
                 <div class="search-box">
                     <label class="ts-label">Pencarian Lanjutan (Ketik "kosong" untuk mendeteksi data blank)</label>
-                    <input type="text" id="searchInput-${user}" placeholder="Cari Data" onkeyup="handleSearch('${user}')">
+                    <input type="text" id="searchInput-${user}" placeholder="Cari Data" value="${escHtml(sd.searchTerm || '')}" onkeyup="handleSearch('${user}')">
                 </div>
             `;
         }
 
+        const titleHTML = sd.isManual ? escHtml(sd.title || 'Daftar Manual') : `Laporan: @${user}`;
+
         innerHTMLSamaDengan(div, `
-            <h2>Laporan: @${user}</h2>
+            <h2>${titleHTML}</h2>
+            <div class="list-tools">
+                <label class="ts-label">Tambah Data Sendiri</label>
+                <textarea id="addLinkInput-${user}" rows="2" placeholder="Tempel link video TikTok (boleh banyak, pisahkan dengan spasi / enter). Like, komen, judul, hashtag, dll dideteksi otomatis."></textarea>
+                <div class="list-tools-row">
+                    <button type="button" class="btn-tool" onclick="addLinksToList('${user}')">+ Tambah dari Link</button>
+                    <input type="file" id="listCsvInput-${user}" accept=".csv" multiple style="display:none;" onchange="uploadCSVToList('${user}', this)">
+                    <button type="button" class="btn-tool btn-tool-alt" onclick="document.getElementById('listCsvInput-${user}').click()">Upload CSV ke Daftar</button>
+                </div>
+                <div id="addStatus-${user}" class="list-tools-status"></div>
+            </div>
             ${searchBoxHTML}
             <div class="tabs">
                 <div class="tab active" id="tab-act-${user}" onclick="switchTab('${user}', 'act')">Daftar Utama</div>
@@ -877,6 +1045,7 @@
         `);
 
         renderListData(user);
+        if (wasTrashActive) switchTab(user, 'trh');
     }
 
     function renderListData(user) {
@@ -950,7 +1119,7 @@
     function generateListHTML(items, user, isActiveTab) {
         if(!items.length) return `<div style="padding: 20px; text-align:center; color: var(--ts-text-muted); font-size: 0.9rem;">Data kosong.</div>`;
         return items.map((item) => `
-            <div class="data-item ${item.isMatched ? 'highlight-match' : ''} ${item.isForceRestored && isActiveTab ? 'manual-restored' : ''}">
+            <div class="data-item ${item.isMatched ? 'highlight-match' : ''} ${item.isForceRestored && isActiveTab ? 'manual-restored' : ''} ${item.isManual ? 'manual-added' : ''}">
                 <div class="data-thumb${item.link ? ' has-preview' : ''}" ${item.link ? `onclick="openVideoPreview('${escapeStr(item.link)}')"` : ''}>
                     ${item.cover
                         ? `<img src="${item.cover}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentElement.innerHTML='<i data-lucide=&quot;video-off&quot;></i>'; lucide.createIcons();">`
@@ -958,7 +1127,7 @@
                     ${item.link ? `<div class="thumb-play-overlay"><i data-lucide="play"></i></div>` : ''}
                 </div>
                 <div class="data-body">
-                    <div class="data-title">${item.displayNo}. ${item.title || "<i>(Blank Title)</i>"}</div>
+                    <div class="data-title">${item.displayNo}. ${item.title ? escHtml(item.title) : "<i>(Blank Title)</i>"}${item.isManual ? ' <span class="manual-badge">Manual</span>' : ''}</div>
                     <div class="data-meta">
                         Tanggal: <span class="stat-highlight">${item.tglStr}</span> | 
                         Views: <span class="stat-highlight">${item.views}</span> | 
@@ -966,7 +1135,7 @@
                         Komen: <span class="stat-highlight">${item.komens}</span> | 
                         Share: <span class="stat-highlight">${item.shares}</span> | 
                         Save: <span class="stat-highlight">${item.saves}</span><br>
-                        <div style="margin-top: 6px; color: var(--ts-text-muted); font-size: 0.75rem;">${item.hashtags || '<i>No tags</i>'}</div>
+                        <div style="margin-top: 6px; color: var(--ts-text-muted); font-size: 0.75rem;">${item.hashtags ? escHtml(item.hashtags) : '<i>No tags</i>'}</div>
                         ${item.trashReason && !isActiveTab ? `<div class="reason-badge">${item.trashReason}</div>` : ''}
                     </div>
                 </div>
@@ -978,6 +1147,288 @@
                 </div>
             </div>
         `).join('');
+    }
+
+    /* =======================================================
+       DAFTAR MANUAL: UPLOAD CSV & TAMBAH DATA DARI LINK
+       Kartu ini selalu tampil (tidak hilang saat ambil data). Data bisa
+       ditambah lewat upload CSV atau tempel link video; detail (judul,
+       hashtag, like, komen, dll) dideteksi lewat API tikwm yang sama.
+    ======================================================== */
+    const MANUAL_KEY = '_daftar_manual_';
+
+    function ensureManualList() {
+        if (sessionData[MANUAL_KEY]) return;
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        sessionData[MANUAL_KEY] = {
+            isManual: true, title: 'Daftar Manual (Upload CSV / Tambah Link)',
+            dates: { start: today, end: new Date(today) }, items: [], searchTerm: "", isBusy: false
+        };
+        renderUI(MANUAL_KEY);
+    }
+
+    function newItemId(sd) {
+        let max = 0;
+        sd.items.forEach(i => { const m = /^vid_(\d+)$/.exec(i.id || ''); if (m) max = Math.max(max, parseInt(m[1], 10)); });
+        return `vid_${max + 1}`;
+    }
+
+    function startOfDay(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
+
+    // Urutkan berdasar tanggal, nomori ulang, dan (khusus daftar manual) hitung rentang tanggal untuk nama file.
+    function finalizeItems(sd) {
+        sortAndNumberItems(sd);
+        if (sd.isManual) {
+            const times = sd.items.filter(i => i.tglObj).map(i => startOfDay(i.tglObj).getTime());
+            if (times.length) {
+                sd.dates = { start: new Date(Math.min(...times)), end: new Date(Math.max(...times)) };
+            } else {
+                const t = startOfDay(new Date());
+                sd.dates = { start: t, end: new Date(t) };
+            }
+        }
+    }
+
+    function setAddStatus(user, msg, kind) {
+        const el = panggilElementDariID(`addStatus-${user}`);
+        if (!el) return;
+        el.textContent = msg || '';
+        el.className = 'list-tools-status' + (kind ? ` ${kind}` : '');
+    }
+
+    function itemFromMeta(meta, link, sd) {
+        const d = new Date(meta.createTime * 1000);
+        const canon = (meta.id && meta.author && meta.author.username)
+            ? `https://www.tiktok.com/@${meta.author.username}/video/${meta.id}` : link;
+        return {
+            id: newItemId(sd), tglObj: d, tglStr: formatTgl(d),
+            title: meta.title || "", hashtags: meta.hashtagString || "", link: canon, cover: meta.cover || null,
+            views: meta.stats.views, likes: meta.stats.likes,
+            komens: meta.stats.comments, shares: meta.stats.shares, saves: meta.stats.saves,
+            isTrashed: false, trashReason: "", isForceRestored: false, isMatched: false, isManual: true
+        };
+    }
+
+    async function addLinksToList(user) {
+        const sd = sessionData[user];
+        if (!sd) return;
+        if (sd.isBusy) return notif("Masih ada proses di daftar ini, tunggu sebentar.");
+
+        const input = panggilElementDariID(`addLinkInput-${user}`);
+        const links = Array.from(new Set(
+            (input ? input.value : '').split(/[\s,]+/).map(x => x.trim()).filter(x => /^https?:\/\//i.test(x))
+        ));
+        if (!links.length) return notif("Tempel minimal 1 link video TikTok yang valid (diawali https://).");
+
+        sd.isBusy = true;
+        let ok = 0, dup = 0;
+        const failed = [];
+
+        try {
+            for (let i = 0; i < links.length; i++) {
+                const link = links[i];
+                setAddStatus(user, `Mendeteksi ${i + 1}/${links.length}...`, 'running');
+                addLog(`Mendeteksi link manual ${i + 1}/${links.length}...`, "running");
+                try {
+                    const meta = await detectMetaRetry(link);
+                    if (!meta.createTime) throw new Error("Tanggal video tidak terdeteksi.");
+                    const item = itemFromMeta(meta, link, sd);
+                    if (isDupItem(sd.items, item)) { dup++; continue; }
+                    sd.items.push(item);
+                    ok++;
+                } catch (err) {
+                    failed.push({ link, msg: (err && err.message) || 'Gagal mendeteksi' });
+                }
+                if (i < links.length - 1) await sleepMs(tikwmDelayMs);
+            }
+        } finally {
+            sd.isBusy = false;
+        }
+
+        finalizeItems(sd);
+        renderUI(user);
+
+        // Link yang gagal dikembalikan ke kotak input supaya bisa dicoba lagi.
+        const newInput = panggilElementDariID(`addLinkInput-${user}`);
+        if (newInput && failed.length) newInput.value = failed.map(f => f.link).join('\n');
+
+        let msg = `${ok} data ditambahkan`;
+        if (dup) msg += `, ${dup} sudah ada di daftar`;
+        if (failed.length) msg += `, ${failed.length} gagal terdeteksi (${failed[0].msg})`;
+        setAddStatus(user, msg, failed.length ? 'error' : 'success');
+        addLog(msg, failed.length && !ok ? "error" : "success");
+    }
+
+    /* ---------- Parser CSV untuk daftar ---------- */
+    const BULAN_MAP = { jan:0, feb:1, mar:2, apr:3, mei:4, may:4, jun:5, jul:6, agu:7, ags:7, aug:7, sep:8, okt:9, oct:9, nov:10, des:11, dec:11 };
+
+    function parseTglFlexible(str) {
+        const t = String(str || '').trim();
+        if (!t) return null;
+        let m = t.match(/^(\d{1,2})[\s\-\/]+([A-Za-z]{3,})\.?[\s\-\/,]+(\d{2,4})/);
+        if (m) {
+            const mon = BULAN_MAP[m[2].slice(0, 3).toLowerCase()];
+            if (mon !== undefined) {
+                let y = parseInt(m[3], 10); if (y < 100) y += 2000;
+                const d = new Date(y, mon, parseInt(m[1], 10));
+                if (!isNaN(d)) return d;
+            }
+        }
+        m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+        if (m) return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+        m = t.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
+        if (m) {
+            let y = parseInt(m[3], 10); if (y < 100) y += 2000;
+            return new Date(y, parseInt(m[2], 10) - 1, parseInt(m[1], 10));
+        }
+        const d = new Date(t);
+        return isNaN(d) ? null : new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    }
+
+    function parseCountFlexible(v) {
+        const t = String(v === undefined || v === null ? '' : v).trim();
+        if (!t) return 0;
+        const m = t.match(/^([\d.,]+)\s*([kKmMbB])?$/);
+        if (m && m[2]) {
+            const mult = { k: 1e3, m: 1e6, b: 1e9 }[m[2].toLowerCase()];
+            return Math.round(parseFloat(m[1].replace(',', '.')) * mult) || 0;
+        }
+        const n = parseInt(t.replace(/[^\d]/g, ''), 10);
+        return isNaN(n) ? 0 : n;
+    }
+
+    function mapCSVColumns(headerRow) {
+        const rules = [
+            ['date', /tanggal|^tgl|date/], ['title', /judul|title|caption/], ['hashtags', /hashtag|^tags?$/],
+            ['link', /link|url|tautan/], ['views', /^views?$|tayangan/], ['likes', /like|suka/],
+            ['komens', /komen|comment/], ['shares', /share|bagikan/], ['saves', /save|simpan/]
+        ];
+        const map = {};
+        headerRow.forEach((h, idx) => {
+            const n = String(h || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            for (const [key, re] of rules) {
+                if (map[key] === undefined && re.test(n)) { map[key] = idx; break; }
+            }
+        });
+        return map;
+    }
+
+    function csvRowsToItems(rows) {
+        if (!rows.length) return [];
+        let map = mapCSVColumns(rows[0]);
+        let dataRows;
+        if (Object.keys(map).length >= 2 || map.link !== undefined) {
+            dataRows = rows.slice(1);
+        } else {
+            dataRows = rows;
+            if (rows[0].length >= 10) {
+                map = { date: 1, title: 2, hashtags: 3, link: 4, views: 5, likes: 6, komens: 7, shares: 8, saves: 9 };
+            } else {
+                // Tanpa header: cari kolom yang isinya link.
+                let linkCol = -1, best = 0;
+                const width = Math.max(...rows.map(r => r.length));
+                for (let c = 0; c < width; c++) {
+                    const cnt = rows.filter(r => /^https?:\/\//i.test(r[c] || '')).length;
+                    if (cnt > best) { best = cnt; linkCol = c; }
+                }
+                map = linkCol >= 0 ? { link: linkCol } : {};
+            }
+        }
+
+        const get = (r, key) => (map[key] !== undefined ? (r[map[key]] || '') : '');
+        const out = [];
+        dataRows.forEach(r => {
+            let link = get(r, 'link').replace(/[\\\s]/g, '');
+            if (link && !/^https?:\/\//i.test(link) && /tiktok\.com/i.test(link)) link = 'https://' + link;
+            const title = get(r, 'title').replace(/[\r\n]+/g, ' ').trim();
+            const dateRaw = get(r, 'date');
+            const d = parseTglFlexible(dateRaw);
+            out.push({
+                link, title, hashtags: get(r, 'hashtags').trim(),
+                tglObj: d, tglStr: d ? formatTgl(d) : String(dateRaw || '').trim(),
+                views: parseCountFlexible(get(r, 'views')), likes: parseCountFlexible(get(r, 'likes')),
+                komens: parseCountFlexible(get(r, 'komens')), shares: parseCountFlexible(get(r, 'shares')),
+                saves: parseCountFlexible(get(r, 'saves'))
+            });
+        });
+        return out;
+    }
+
+    async function uploadCSVToList(user, input) {
+        const sd = sessionData[user];
+        const files = Array.from((input && input.files) || []);
+        if (input) input.value = "";
+        if (!sd || !files.length) return;
+        if (sd.isBusy) return notif("Masih ada proses di daftar ini, tunggu sebentar.");
+
+        sd.isBusy = true;
+        let added = 0, dup = 0, blank = 0, detectFailed = 0;
+        const problems = [];
+
+        try {
+            for (const file of files) {
+                if (!file.name.toLowerCase().endsWith('.csv')) { problems.push(`'${file.name}' bukan format CSV`); continue; }
+                if (file.size > 10 * 1024 * 1024) { problems.push(`'${file.name}' melebihi 10MB`); continue; }
+
+                let raw = '';
+                try { raw = await file.text(); } catch (e) { problems.push(`'${file.name}' gagal dibaca`); continue; }
+                raw = raw.replace(/^\uFEFF/, '');
+                if (raw.trim() === '' || raw.indexOf('\x00') !== -1) { problems.push(`'${file.name}' kosong/rusak`); continue; }
+
+                const rowsParsed = csvRowsToItems(parseCSVRobust(raw));
+                if (!rowsParsed.length) { problems.push(`'${file.name}' tidak ada baris data`); continue; }
+
+                for (let i = 0; i < rowsParsed.length; i++) {
+                    const row = rowsParsed[i];
+                    if (!row.link && !row.title) { blank++; continue; }
+
+                    if (isDupItem(sd.items, row)) { dup++; continue; }
+
+                    const hasOnlyLink = row.link && !row.title && !row.hashtags && !row.tglObj &&
+                        !row.views && !row.likes && !row.komens && !row.shares && !row.saves;
+
+                    if (hasOnlyLink) {
+                        // Baris cuma berisi link -> lengkapi datanya lewat API deteksi.
+                        setAddStatus(user, `Mendeteksi link dari CSV (${i + 1}/${rowsParsed.length})...`, 'running');
+                        try {
+                            const meta = await detectMetaRetry(row.link);
+                            if (!meta.createTime) throw new Error("Tanggal video tidak terdeteksi.");
+                            const item = itemFromMeta(meta, row.link, sd);
+                            if (isDupItem(sd.items, item)) { dup++; continue; }
+                            sd.items.push(item);
+                            added++;
+                        } catch (err) {
+                            detectFailed++;
+                            if (problems.length < 3) problems.push(`${row.link}: ${(err && err.message) || 'gagal terdeteksi'}`);
+                        }
+                        await sleepMs(tikwmDelayMs);
+                        continue;
+                    }
+
+                    sd.items.push({
+                        id: newItemId(sd), tglObj: row.tglObj, tglStr: row.tglStr,
+                        title: row.title, hashtags: row.hashtags, link: row.link, cover: null,
+                        views: row.views, likes: row.likes, komens: row.komens, shares: row.shares, saves: row.saves,
+                        isTrashed: false, trashReason: "", isForceRestored: false, isMatched: false, isManual: true
+                    });
+                    added++;
+                }
+            }
+        } finally {
+            sd.isBusy = false;
+        }
+
+        finalizeItems(sd);
+        renderUI(user);
+
+        let msg = `${added} data dari CSV ditambahkan`;
+        if (dup) msg += `, ${dup} sudah ada`;
+        if (blank) msg += `, ${blank} baris kosong dilewati`;
+        if (detectFailed) msg += `, ${detectFailed} link gagal terdeteksi`;
+        if (problems.length) msg += ` | ${problems.join('; ')}`;
+        const bad = !added && (problems.length || detectFailed);
+        setAddStatus(user, msg, bad ? 'error' : 'success');
+        addLog(msg, bad ? "error" : "success");
     }
 
     function downloadData(user) {
@@ -2206,6 +2657,7 @@
     window.onload = () => {
         toggleDateUI();
         initApp();
+        ensureManualList();
         
         const startBtn = panggilElementDariID('btn-start-scrape');
         if (startBtn) {

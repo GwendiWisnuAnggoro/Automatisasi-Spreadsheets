@@ -182,3 +182,15 @@
 #tiktok-scraper .list-tools .account-row { margin-bottom: 8px; }
 #tiktok-scraper .detect-badge { display: inline-block; font-size: 0.65rem; font-weight: 600; padding: 1px 7px; margin-left: 6px; border-radius: 9999px; background: rgba(148, 163, 184, 0.15); color: var(--ts-text-muted); border: 1px solid var(--ts-border); vertical-align: middle; animation: detectPulse 1.2s ease-in-out infinite; }
 @keyframes detectPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+/* ===== Loading berpersentase melayang (di atas semua elemen, bawah layar) ===== */
+#floatProgressStack { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); width: min(92vw, 420px); display: flex; flex-direction: column; gap: 8px; z-index: 2147483000; pointer-events: none; }
+#floatProgressStack .fp-item { background: rgba(15, 23, 42, 0.96); border: 1px solid rgba(139, 92, 246, 0.55); border-radius: 12px; padding: 10px 14px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55); color: #f1f5f9; font-family: inherit; transition: opacity 0.3s, transform 0.3s; }
+#floatProgressStack .fp-item.fp-hide { opacity: 0; transform: translateY(10px); }
+#floatProgressStack .fp-top { display: flex; justify-content: space-between; gap: 10px; font-size: 0.8rem; font-weight: 600; margin-bottom: 7px; }
+#floatProgressStack .fp-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#floatProgressStack .fp-pct { color: #c4b5fd; flex-shrink: 0; }
+#floatProgressStack .fp-track { height: 8px; background: #1e293b; border-radius: 9999px; overflow: hidden; }
+#floatProgressStack .fp-fill { height: 100%; width: 0%; border-radius: 9999px; background: linear-gradient(to right, #8b5cf6, #6366f1); transition: width 0.25s ease; }
+#floatProgressStack .fp-item.fp-error { border-color: rgba(248, 113, 113, 0.7); }
+#floatProgressStack .fp-item.fp-error .fp-fill { background: #f87171; }

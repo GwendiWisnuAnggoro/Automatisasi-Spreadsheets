@@ -810,8 +810,12 @@
 
     // Kunci isi konten: judul + hashtag + tanggal, tidak peduli huruf besar/kecil,
     // spasi ganda, tanda baca, simbol #, atau urutan hashtag. Judul kosong tidak dianggap sama.
+    // Regex unicode dibuat lewat RegExp() + try/catch supaya browser lama (WebView lawas)
+    // tidak gagal memuat seluruh script karena sintaks yang tidak dikenal.
+    let NORM_RE;
+    try { NORM_RE = new RegExp('[^\\p{L}\\p{N}]+', 'gu'); } catch (e) { NORM_RE = /[^a-z0-9]+/g; }
     function normText(t) {
-        return String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+        return String(t || '').toLowerCase().replace(NORM_RE, ' ').trim();
     }
     function contentKey(item) {
         const title = normText(item.title);

@@ -158,3 +158,21 @@
             #tiktok-scraper .data-title { font-size: 0.85rem; }
             #tiktok-scraper .data-meta { font-size: 0.72rem; }
         }
+
+/* ===== Panel tambah data (upload CSV / tempel link) di kartu daftar ===== */
+#tiktok-scraper .list-tools { background: #0f172a; border: 1px solid var(--ts-border); border-radius: 8px; padding: 14px; margin: 12px 0 15px; }
+#tiktok-scraper .list-tools textarea { width: 100%; background: #0b1220; border: 1px solid var(--ts-border); color: white; border-radius: 8px; padding: 10px 12px; font-size: 0.85rem; font-family: inherit; resize: vertical; outline: none; box-sizing: border-box; }
+#tiktok-scraper .list-tools textarea:focus { border-color: var(--ts-primary); }
+#tiktok-scraper .list-tools-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+#tiktok-scraper .btn-tool { background: var(--ts-primary); color: white; border: none; border-radius: 8px; padding: 9px 14px; font-size: 0.8rem; font-weight: 600; cursor: pointer; flex: 1; min-width: 140px; }
+#tiktok-scraper .btn-tool:hover { background: var(--ts-primary-hover); }
+#tiktok-scraper .btn-tool-alt { background: transparent; border: 1px dashed var(--ts-border); color: var(--ts-text-muted); }
+#tiktok-scraper .btn-tool-alt:hover { background: transparent; border-color: var(--ts-text); color: var(--ts-text); }
+#tiktok-scraper .list-tools-status { margin-top: 8px; font-size: 0.78rem; color: var(--ts-text-muted); min-height: 1em; word-break: break-word; }
+#tiktok-scraper .list-tools-status.running { color: #fbbf24; }
+#tiktok-scraper .list-tools-status.success { color: var(--ts-success); }
+#tiktok-scraper .list-tools-status.error { color: #f87171; }
+#tiktok-scraper .manual-badge { display: inline-block; font-size: 0.65rem; font-weight: 600; padding: 1px 7px; margin-left: 6px; border-radius: 9999px; background: rgba(99, 102, 241, 0.15); color: #a5b4fc; border: 1px solid rgba(99, 102, 241, 0.35); vertical-align: middle; }
+#tiktok-scraper .data-item.manual-added { border-left: 3px solid #8b5cf6; background: linear-gradient(to right, rgba(139, 92, 246, 0.35), rgba(0, 0, 0, 0.6)); }
+#tiktok-scraper .data-item.manual-added.highlight-match { border-left-color: var(--ts-primary); }
+#tiktok-scraper .manual-badge { background: rgba(139, 92, 246, 0.25); color: #c4b5fd; border-color: rgba(139, 92, 246, 0.5); }

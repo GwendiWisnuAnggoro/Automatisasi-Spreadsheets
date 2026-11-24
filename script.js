@@ -888,7 +888,8 @@
 
         tikwmDelayMs = 150;
 
-        for (const user of usernames) {
+        for (const rawUser of usernames) {
+            const user = findAccountKey(rawUser) || rawUser;
             addLog(`Memproses Data @${user}...`, "running");
 
             try {
@@ -1008,6 +1009,30 @@
             else resArea.appendChild(div);
         }
 
+        // Panel "Tambah Data" hanya SATU (di paling bawah). Kartu akun murni berisi daftarnya.
+        if (sd.isPanel) {
+            innerHTMLSamaDengan(div, `
+                <h2>Tambah Data</h2>
+                <div class="list-tools">
+                    <label class="ts-label">Data otomatis masuk ke daftar akunnya. Akun yang belum ada dibuatkan daftar baru.</label>
+                    <div id="addLinkList-${user}">
+                        <div class="account-row">
+                            <input type="text" class="add-link-input" placeholder="Masukkan link video TikTok">
+                            <button class="btn-del" onclick="removeLinkRow(this)">✕</button>
+                        </div>
+                    </div>
+                    <button type="button" class="btn-add" onclick="addLinkRow('${user}')">+ Tambah Link Lain</button>
+                    <div class="list-tools-row">
+                        <button type="button" class="btn-tool" onclick="addLinksToList('${user}')">Tambahkan ke Daftar</button>
+                        <input type="file" id="listCsvInput-${user}" accept=".csv" multiple style="display:none;" onchange="uploadCSVToList('${user}', this)">
+                        <button type="button" class="btn-tool btn-tool-alt" onclick="document.getElementById('listCsvInput-${user}').click()">Upload CSV ke Daftar</button>
+                    </div>
+                    <div id="addStatus-${user}" class="list-tools-status"></div>
+                </div>
+            `);
+            return;
+        }
+
         const prevTrashTab = panggilElementDariID(`tab-trh-${user}`);
         const wasTrashActive = !!(prevTrashTab && prevTrashTab.classList.contains('active'));
 
@@ -1021,26 +1046,8 @@
             `;
         }
 
-        const titleHTML = sd.isManual ? escHtml(sd.title || 'Daftar Manual') : `Laporan: @${user}`;
-
         innerHTMLSamaDengan(div, `
-            <h2>${titleHTML}</h2>
-            <div class="list-tools">
-                <label class="ts-label">Tambah Data Sendiri</label>
-                <div id="addLinkList-${user}">
-                    <div class="account-row">
-                        <input type="text" class="add-link-input" placeholder="Masukkan link video TikTok">
-                        <button class="btn-del" onclick="removeLinkRow(this)">✕</button>
-                    </div>
-                </div>
-                <button type="button" class="btn-add" onclick="addLinkRow('${user}')">+ Tambah Link Lain</button>
-                <div class="list-tools-row">
-                    <button type="button" class="btn-tool" onclick="addLinksToList('${user}')">Tambahkan ke Daftar</button>
-                    <input type="file" id="listCsvInput-${user}" accept=".csv" multiple style="display:none;" onchange="uploadCSVToList('${user}', this)">
-                    <button type="button" class="btn-tool btn-tool-alt" onclick="document.getElementById('listCsvInput-${user}').click()">Upload CSV ke Daftar</button>
-                </div>
-                <div id="addStatus-${user}" class="list-tools-status"></div>
-            </div>
+            <h2>Laporan: @${user}</h2>
             ${searchBoxHTML}
             <div class="tabs">
                 <div class="tab active" id="tab-act-${user}" onclick="switchTab('${user}', 'act')">Daftar Utama</div>
@@ -1176,10 +1183,33 @@
         if (sessionData[MANUAL_KEY]) return;
         const today = new Date(); today.setHours(0, 0, 0, 0);
         sessionData[MANUAL_KEY] = {
-            isManual: true, title: 'Daftar Manual (Upload CSV / Tambah Link)',
-            dates: { start: today, end: new Date(today) }, items: [], searchTerm: "", isBusy: false
+            isPanel: true, dates: { start: today, end: new Date(today) }, items: [], searchTerm: "", isBusy: false
         };
         renderUI(MANUAL_KEY);
+    }
+
+    // Cari/buat daftar untuk sebuah akun (nama dicocokkan tanpa peduli huruf besar/kecil).
+    function findAccountKey(name) {
+        const n = String(name || '').replace(/^@/, '').trim();
+        if (!n) return null;
+        const low = n.toLowerCase();
+        const found = Object.keys(sessionData).find(k => k !== MANUAL_KEY && k.toLowerCase() === low);
+        return found || n;
+    }
+
+    function getOrCreateAccountSd(name) {
+        const key = findAccountKey(name);
+        if (!sessionData[key]) {
+            const t = new Date(); t.setHours(0, 0, 0, 0);
+            sessionData[key] = { dates: { start: t, end: new Date(t) }, items: [], searchTerm: "", autoDates: true };
+        }
+        return { key, sd: sessionData[key] };
+    }
+
+    function accountFromLink(link) {
+        const m = String(link || '').match(/tiktok\.com\/@([^\/?#]+)/i);
+        if (!m) return null;
+        try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; }
     }
 
     function newItemId(sd) {
@@ -1190,16 +1220,18 @@
 
     function startOfDay(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
 
-    // Urutkan berdasar tanggal, nomori ulang, dan (khusus daftar manual) hitung rentang tanggal untuk nama file.
+    // Urutkan berdasar tanggal, nomori ulang, dan sesuaikan rentang tanggal (untuk nama file)
+    // supaya mencakup data yang ditambahkan manual.
     function finalizeItems(sd) {
         sortAndNumberItems(sd);
-        if (sd.isManual) {
-            const times = sd.items.filter(i => i.tglObj).map(i => startOfDay(i.tglObj).getTime());
-            if (times.length) {
-                sd.dates = { start: new Date(Math.min(...times)), end: new Date(Math.max(...times)) };
-            } else {
-                const t = startOfDay(new Date());
-                sd.dates = { start: t, end: new Date(t) };
+        const times = sd.items.filter(i => i.tglObj).map(i => startOfDay(i.tglObj).getTime());
+        if (sd.autoDates) {
+            if (times.length) sd.dates = { start: new Date(Math.min(...times)), end: new Date(Math.max(...times)) };
+            else { const t = startOfDay(new Date()); sd.dates = { start: t, end: new Date(t) }; }
+        } else if (times.length && sd.dates) {
+            const mn = Math.min(...times), mx = Math.max(...times);
+            if (mn < sd.dates.start.getTime() || mx > sd.dates.end.getTime()) {
+                sd.dates = { start: new Date(Math.min(mn, sd.dates.start.getTime())), end: new Date(Math.max(mx, sd.dates.end.getTime())) };
             }
         }
     }
@@ -1269,18 +1301,19 @@
     }
 
     async function addLinksToList(user) {
-        const sd = sessionData[user];
-        if (!sd) return;
-        if (sd.isBusy) return notif("Masih ada proses di daftar ini, tunggu sebentar.");
+        const panel = sessionData[user];
+        if (!panel) return;
+        if (panel.isBusy) return notif("Masih ada proses penambahan, tunggu sebentar.");
 
         const links = Array.from(new Set(
             getLinkRowValues(user).map(x => x.trim()).filter(x => /^https?:\/\//i.test(x))
         ));
         if (!links.length) return notif("Masukkan minimal 1 link video TikTok yang valid (diawali https://).");
 
-        sd.isBusy = true;
+        panel.isBusy = true;
         let ok = 0, dup = 0;
         const failed = [];
+        const touched = {}; // key akun -> jumlah data baru
 
         try {
             for (let i = 0; i < links.length; i++) {
@@ -1290,25 +1323,32 @@
                 try {
                     const meta = await detectSerial(link);
                     if (!meta.createTime) throw new Error("Tanggal video tidak terdeteksi.");
+                    const uname = (meta.author && meta.author.username) || accountFromLink(link);
+                    if (!uname) throw new Error("Akun video tidak terdeteksi.");
+
+                    // Masuk ke daftar akunnya; kalau akun belum ada, daftar baru dibuat otomatis.
+                    const { key, sd } = getOrCreateAccountSd(uname);
                     const item = itemFromMeta(meta, link, sd);
-                    if (isDupItem(sd.items, item)) { dup++; continue; }
+                    item.account = key;
+                    if (isDupItem(sd.items, item)) { dup++; touched[key] = touched[key] || 0; continue; }
                     sd.items.push(item);
+                    touched[key] = (touched[key] || 0) + 1;
                     ok++;
                 } catch (err) {
                     failed.push({ link, msg: (err && err.message) || 'Gagal mendeteksi' });
                 }
             }
         } finally {
-            sd.isBusy = false;
+            panel.isBusy = false;
         }
 
-        finalizeItems(sd);
-        renderUI(user);
+        Object.keys(touched).forEach(k => { finalizeItems(sessionData[k]); renderUI(k); });
 
         // Link yang gagal dikembalikan ke baris input supaya bisa dicoba lagi.
-        if (failed.length) fillLinkRows(user, failed.map(f => f.link));
+        fillLinkRows(user, failed.map(f => f.link));
 
-        let msg = `${ok} data ditambahkan`;
+        const names = Object.keys(touched).filter(k => touched[k] > 0).map(k => `@${k}`).join(', ');
+        let msg = `${ok} data ditambahkan` + (names ? ` ke ${names}` : '');
         if (dup) msg += `, ${dup} sudah ada di daftar`;
         if (failed.length) msg += `, ${failed.length} gagal terdeteksi (${failed[0].msg})`;
         setAddStatus(user, msg, failed.length ? 'error' : 'success');
@@ -1330,7 +1370,7 @@
 
                 const pendingLeft = sd.items.filter(i => i.pendingDetect).length;
                 const total = done + fail + removed + pendingLeft;
-                setAddStatus(user, `Mendeteksi ulang video ${done + fail + removed + 1}/${total}...`, 'running');
+                setAddStatus(MANUAL_KEY, `@${user}: mendeteksi ulang video ${done + fail + removed + 1}/${total}...`, 'running');
 
                 try {
                     const meta = await detectSerial(item.link);
@@ -1361,11 +1401,11 @@
         }
 
         if (sessionData[user] !== sd) return;
-        refreshCard(user);
-        let msg = `Deteksi ulang CSV selesai: ${done} terisi`;
+        renderUI(user);
+        let msg = `@${user}: deteksi ulang CSV selesai, ${done} terisi`;
         if (removed) msg += `, ${removed} dobel dibuang`;
         if (fail) msg += `, ${fail} gagal terdeteksi`;
-        setAddStatus(user, msg, fail ? 'error' : 'success');
+        setAddStatus(MANUAL_KEY, msg, fail ? 'error' : 'success');
         addLog(msg, fail && !done ? "error" : "success");
     }
 
@@ -1465,17 +1505,20 @@
     }
 
     async function uploadCSVToList(user, input) {
-        const sd = sessionData[user];
+        const panel = sessionData[user];
         const files = Array.from((input && input.files) || []);
         if (input) input.value = "";
-        if (!sd || !files.length) return;
-        if (sd.isBusy) return notif("Masih ada proses di daftar ini, tunggu sebentar.");
+        if (!panel || !files.length) return;
+        if (panel.isBusy) return notif("Masih ada proses di panel ini, tunggu sebentar.");
 
-        sd.isBusy = true;
+        panel.isBusy = true;
         let added = 0, dup = 0, blank = 0;
         const problems = [];
+        const touched = {};
 
         try {
+            // 1) Baca semua file CSV
+            const allRows = [];
             for (const file of files) {
                 if (!file.name.toLowerCase().endsWith('.csv')) { problems.push(`'${file.name}' bukan format CSV`); continue; }
                 if (file.size > 10 * 1024 * 1024) { problems.push(`'${file.name}' melebihi 10MB`); continue; }
@@ -1487,42 +1530,70 @@
 
                 const rowsParsed = csvRowsToItems(parseCSVRobust(raw));
                 if (!rowsParsed.length) { problems.push(`'${file.name}' tidak ada baris data`); continue; }
+                rowsParsed.forEach(r => { if (!r.link && !r.title) blank++; else allRows.push(r); });
+            }
 
-                for (const row of rowsParsed) {
-                    if (!row.link && !row.title) { blank++; continue; }
-                    if (isDupItem(sd.items, row)) { dup++; continue; }
+            if (allRows.length) {
+                // 2) Tentukan akun: dari link (@akun) konten paling awal; kalau link pendek
+                //    (tanpa @akun), konten pertama dideteksi lewat API.
+                let firstAccount = null;
+                for (const r of allRows) { const a = accountFromLink(r.link); if (a) { firstAccount = a; break; } }
+                if (!firstAccount) {
+                    const firstLinkRow = allRows.find(r => r.link);
+                    if (firstLinkRow) {
+                        setAddStatus(user, 'Mendeteksi akun dari konten pertama CSV...', 'running');
+                        try {
+                            const meta = await detectSerial(firstLinkRow.link);
+                            firstAccount = (meta.author && meta.author.username) || null;
+                        } catch (e) { /* ditangani di bawah */ }
+                    }
+                }
 
-                    const hasOnlyLink = row.link && !row.title && !row.hashtags && !row.tglObj &&
-                        !row.views && !row.likes && !row.komens && !row.shares && !row.saves;
+                if (!firstAccount) {
+                    problems.push('akun tidak terdeteksi dari CSV (pastikan ada kolom link video)');
+                } else {
+                    // 3) Masukkan ke daftar akunnya masing-masing (daftar baru dibuat kalau belum ada)
+                    for (const row of allRows) {
+                        const acc = accountFromLink(row.link) || firstAccount;
+                        const { key, sd } = getOrCreateAccountSd(acc);
+                        touched[key] = touched[key] || 0;
 
-                    // Masuk dulu ke list biasa (bukan "manual"); detail & thumbnail dilengkapi lewat antrian.
-                    sd.items.push({
-                        id: newItemId(sd), tglObj: row.tglObj, tglStr: row.tglStr,
-                        title: row.title, hashtags: row.hashtags, link: row.link, cover: null,
-                        views: row.views, likes: row.likes, komens: row.komens, shares: row.shares, saves: row.saves,
-                        isTrashed: false, trashReason: "", isForceRestored: false, isMatched: false,
-                        fromCSV: true, pendingDetect: !!row.link, placeholder: !!hasOnlyLink
-                    });
-                    added++;
+                        if (isDupItem(sd.items, row)) { dup++; continue; }
+
+                        const hasOnlyLink = row.link && !row.title && !row.hashtags && !row.tglObj &&
+                            !row.views && !row.likes && !row.komens && !row.shares && !row.saves;
+
+                        // Masuk dulu ke list biasa (bukan "manual"); detail & thumbnail dilengkapi lewat antrian.
+                        sd.items.push({
+                            id: newItemId(sd), tglObj: row.tglObj, tglStr: row.tglStr, account: key,
+                            title: row.title, hashtags: row.hashtags, link: row.link, cover: null,
+                            views: row.views, likes: row.likes, komens: row.komens, shares: row.shares, saves: row.saves,
+                            isTrashed: false, trashReason: "", isForceRestored: false, isMatched: false,
+                            fromCSV: true, pendingDetect: !!row.link, placeholder: !!hasOnlyLink
+                        });
+                        touched[key]++;
+                        added++;
+                    }
                 }
             }
         } finally {
-            sd.isBusy = false;
+            panel.isBusy = false;
         }
 
-        finalizeItems(sd);
-        refreshCard(user);
+        const keys = Object.keys(touched);
+        keys.forEach(k => { finalizeItems(sessionData[k]); renderUI(k); });
 
-        let msg = `${added} data dari CSV masuk ke daftar`;
+        const names = keys.filter(k => touched[k] > 0).map(k => `@${k}`).join(', ');
+        let msg = `${added} data dari CSV masuk` + (names ? ` ke ${names}` : '');
         if (dup) msg += `, ${dup} sudah ada`;
         if (blank) msg += `, ${blank} baris kosong dilewati`;
         if (problems.length) msg += ` | ${problems.join('; ')}`;
-        const queued = sd.items.filter(i => i.pendingDetect).length;
+        const queued = keys.reduce((n, k) => n + sessionData[k].items.filter(i => i.pendingDetect).length, 0);
         if (queued) msg += ` | mendeteksi ulang ${queued} video...`;
         setAddStatus(user, msg, !added && problems.length ? 'error' : 'success');
         addLog(msg, !added && problems.length ? "error" : "success");
 
-        if (queued) runDetectQueue(user);
+        keys.forEach(k => { if (sessionData[k].items.some(i => i.pendingDetect)) runDetectQueue(k); });
     }
 
     function downloadData(user) {

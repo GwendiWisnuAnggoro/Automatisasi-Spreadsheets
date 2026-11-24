@@ -176,3 +176,9 @@
 #tiktok-scraper .data-item.manual-added { border-left: 3px solid #8b5cf6; background: linear-gradient(to right, rgba(139, 92, 246, 0.35), rgba(0, 0, 0, 0.6)); }
 #tiktok-scraper .data-item.manual-added.highlight-match { border-left-color: var(--ts-primary); }
 #tiktok-scraper .manual-badge { background: rgba(139, 92, 246, 0.25); color: #c4b5fd; border-color: rgba(139, 92, 246, 0.5); }
+
+/* ===== Input link berbaris & status deteksi ulang ===== */
+#tiktok-scraper .list-tools .btn-add { margin-bottom: 4px; }
+#tiktok-scraper .list-tools .account-row { margin-bottom: 8px; }
+#tiktok-scraper .detect-badge { display: inline-block; font-size: 0.65rem; font-weight: 600; padding: 1px 7px; margin-left: 6px; border-radius: 9999px; background: rgba(148, 163, 184, 0.15); color: var(--ts-text-muted); border: 1px solid var(--ts-border); vertical-align: middle; animation: detectPulse 1.2s ease-in-out infinite; }
+@keyframes detectPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }

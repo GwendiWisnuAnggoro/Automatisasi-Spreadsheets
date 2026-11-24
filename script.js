@@ -851,6 +851,15 @@
         throw lastErr;
     }
 
+    // Semua deteksi tikwm (scraping, tambah link, antrian CSV) dijalankan satu per satu
+    // dengan jeda, supaya tidak saling tabrakan dan kena limit.
+    let tikwmLock = Promise.resolve();
+    function detectSerial(link) {
+        const run = tikwmLock.then(() => detectMetaRetry(link));
+        tikwmLock = run.catch(() => {}).then(() => sleepMs(tikwmDelayMs));
+        return run;
+    }
+
     function sortAndNumberItems(sd) {
         sd.items.sort((a, b) => {
             const ta = a.tglObj ? a.tglObj.getTime() : null;
@@ -889,7 +898,7 @@
                 const st = { cap: APIFY_PAGE_CAP, warnSaturated: false };
                 const items = await fetchApifyRangeAll(user, utcDayStr(dates.start), utcDayStr(dates.end), st);
 
-                const prevManual = ((sessionData[user] && sessionData[user].items) || []).filter(i => i.isManual);
+                const prevManual = ((sessionData[user] && sessionData[user].items) || []).filter(i => i.isManual || i.fromCSV);
                 const newSd = { dates: dates, items: [], searchTerm: "" };
 
                 const linkToItem = {};
@@ -909,7 +918,7 @@
                     const rawItem = linkToItem[link];
 
                     try {
-                        const meta = await detectMetaRetry(link);
+                        const meta = await detectSerial(link);
                         if (!meta.createTime) throw new Error("Tanggal video tidak terdeteksi dari API.");
 
                         const d = new Date(meta.createTime * 1000);
@@ -944,7 +953,6 @@
                         });
                     }
 
-                    await sleepMs(tikwmDelayMs); // jeda kecil biar tidak membanjiri API deteksi
                 }
 
                 // Data yang ditambahkan manual (link/CSV) di daftar ini tetap dipertahankan.
@@ -961,6 +969,7 @@
 
                 addLog(`Berhasil memuat ${newSd.items.length} data dari @${user}` + (removedDup ? ` (${removedDup} data dobel dibuang)` : "") + (st.warnSaturated ? " (ada hari dengan data sangat banyak, kemungkinan belum lengkap)" : ""), "success");
                 renderUI(user);
+                if (newSd.items.some(i => i.pendingDetect)) runDetectQueue(user);
 
             } catch(e) { addLog(`Error ambil data @${user}: ${e.message}`, "error"); }
         }
@@ -1018,9 +1027,15 @@
             <h2>${titleHTML}</h2>
             <div class="list-tools">
                 <label class="ts-label">Tambah Data Sendiri</label>
-                <textarea id="addLinkInput-${user}" rows="2" placeholder="Tempel link video TikTok (boleh banyak, pisahkan dengan spasi / enter). Like, komen, judul, hashtag, dll dideteksi otomatis."></textarea>
+                <div id="addLinkList-${user}">
+                    <div class="account-row">
+                        <input type="text" class="add-link-input" placeholder="Masukkan link video TikTok">
+                        <button class="btn-del" onclick="removeLinkRow(this)">✕</button>
+                    </div>
+                </div>
+                <button type="button" class="btn-add" onclick="addLinkRow('${user}')">+ Tambah Link Lain</button>
                 <div class="list-tools-row">
-                    <button type="button" class="btn-tool" onclick="addLinksToList('${user}')">+ Tambah dari Link</button>
+                    <button type="button" class="btn-tool" onclick="addLinksToList('${user}')">Tambahkan ke Daftar</button>
                     <input type="file" id="listCsvInput-${user}" accept=".csv" multiple style="display:none;" onchange="uploadCSVToList('${user}', this)">
                     <button type="button" class="btn-tool btn-tool-alt" onclick="document.getElementById('listCsvInput-${user}').click()">Upload CSV ke Daftar</button>
                 </div>
@@ -1127,7 +1142,7 @@
                     ${item.link ? `<div class="thumb-play-overlay"><i data-lucide="play"></i></div>` : ''}
                 </div>
                 <div class="data-body">
-                    <div class="data-title">${item.displayNo}. ${item.title ? escHtml(item.title) : "<i>(Blank Title)</i>"}${item.isManual ? ' <span class="manual-badge">Manual</span>' : ''}</div>
+                    <div class="data-title">${item.displayNo}. ${item.title ? escHtml(item.title) : "<i>(Blank Title)</i>"}${item.isManual ? ' <span class="manual-badge">Manual</span>' : ''}${item.pendingDetect ? ' <span class="detect-badge">Mendeteksi...</span>' : ''}</div>
                     <div class="data-meta">
                         Tanggal: <span class="stat-highlight">${item.tglStr}</span> | 
                         Views: <span class="stat-highlight">${item.views}</span> | 
@@ -1201,7 +1216,7 @@
         const canon = (meta.id && meta.author && meta.author.username)
             ? `https://www.tiktok.com/@${meta.author.username}/video/${meta.id}` : link;
         return {
-            id: newItemId(sd), tglObj: d, tglStr: formatTgl(d),
+            id: newItemId(sd), tglObj: d, tglStr: formatTgl(d), account: (meta.author && meta.author.username) || null,
             title: meta.title || "", hashtags: meta.hashtagString || "", link: canon, cover: meta.cover || null,
             views: meta.stats.views, likes: meta.stats.likes,
             komens: meta.stats.comments, shares: meta.stats.shares, saves: meta.stats.saves,
@@ -1209,16 +1224,59 @@
         };
     }
 
+    /* ---------- Input link berbaris (seperti daftar username) ---------- */
+    function appendLinkRow(user, value) {
+        const c = panggilElementDariID(`addLinkList-${user}`);
+        if (!c) return null;
+        const div = document.createElement('div');
+        div.className = 'account-row';
+        div.innerHTML = `<input type="text" class="add-link-input" placeholder="Masukkan link video TikTok"><button class="btn-del" onclick="removeLinkRow(this)">✕</button>`;
+        const inp = div.querySelector('input');
+        inp.value = value || '';
+        c.appendChild(div);
+        return inp;
+    }
+
+    function addLinkRow(user) {
+        const inp = appendLinkRow(user, '');
+        if (inp) inp.focus();
+    }
+
+    function removeLinkRow(btn) {
+        const row = btn.parentElement;
+        const container = row.parentElement;
+        if (container.children.length <= 1) { const inp = row.querySelector('input'); if (inp) inp.value = ''; return; }
+        row.remove();
+    }
+
+    function getLinkRowValues(user) {
+        const c = panggilElementDariID(`addLinkList-${user}`);
+        return c ? Array.from(c.querySelectorAll('.add-link-input')).map(i => i.value) : [];
+    }
+
+    function fillLinkRows(user, values) {
+        const c = panggilElementDariID(`addLinkList-${user}`);
+        if (!c) return;
+        c.innerHTML = '';
+        (values.length ? values : ['']).forEach(v => appendLinkRow(user, v));
+    }
+
+    // Render ulang kartu tanpa menghilangkan link yang sedang diketik.
+    function refreshCard(user) {
+        const vals = getLinkRowValues(user);
+        renderUI(user);
+        if (vals.some(v => v.trim())) fillLinkRows(user, vals);
+    }
+
     async function addLinksToList(user) {
         const sd = sessionData[user];
         if (!sd) return;
         if (sd.isBusy) return notif("Masih ada proses di daftar ini, tunggu sebentar.");
 
-        const input = panggilElementDariID(`addLinkInput-${user}`);
         const links = Array.from(new Set(
-            (input ? input.value : '').split(/[\s,]+/).map(x => x.trim()).filter(x => /^https?:\/\//i.test(x))
+            getLinkRowValues(user).map(x => x.trim()).filter(x => /^https?:\/\//i.test(x))
         ));
-        if (!links.length) return notif("Tempel minimal 1 link video TikTok yang valid (diawali https://).");
+        if (!links.length) return notif("Masukkan minimal 1 link video TikTok yang valid (diawali https://).");
 
         sd.isBusy = true;
         let ok = 0, dup = 0;
@@ -1230,7 +1288,7 @@
                 setAddStatus(user, `Mendeteksi ${i + 1}/${links.length}...`, 'running');
                 addLog(`Mendeteksi link manual ${i + 1}/${links.length}...`, "running");
                 try {
-                    const meta = await detectMetaRetry(link);
+                    const meta = await detectSerial(link);
                     if (!meta.createTime) throw new Error("Tanggal video tidak terdeteksi.");
                     const item = itemFromMeta(meta, link, sd);
                     if (isDupItem(sd.items, item)) { dup++; continue; }
@@ -1239,7 +1297,6 @@
                 } catch (err) {
                     failed.push({ link, msg: (err && err.message) || 'Gagal mendeteksi' });
                 }
-                if (i < links.length - 1) await sleepMs(tikwmDelayMs);
             }
         } finally {
             sd.isBusy = false;
@@ -1248,15 +1305,68 @@
         finalizeItems(sd);
         renderUI(user);
 
-        // Link yang gagal dikembalikan ke kotak input supaya bisa dicoba lagi.
-        const newInput = panggilElementDariID(`addLinkInput-${user}`);
-        if (newInput && failed.length) newInput.value = failed.map(f => f.link).join('\n');
+        // Link yang gagal dikembalikan ke baris input supaya bisa dicoba lagi.
+        if (failed.length) fillLinkRows(user, failed.map(f => f.link));
 
         let msg = `${ok} data ditambahkan`;
         if (dup) msg += `, ${dup} sudah ada di daftar`;
         if (failed.length) msg += `, ${failed.length} gagal terdeteksi (${failed[0].msg})`;
         setAddStatus(user, msg, failed.length ? 'error' : 'success');
         addLog(msg, failed.length && !ok ? "error" : "success");
+    }
+
+    // Antrian deteksi ulang untuk data hasil upload CSV: tiap link dideteksi satu per satu
+    // (thumbnail & statistik terisi bertahap di list), tanpa Apify.
+    async function runDetectQueue(user) {
+        const sd = sessionData[user];
+        if (!sd || sd.queueRunning) return;
+        sd.queueRunning = true;
+        let done = 0, fail = 0, removed = 0;
+
+        try {
+            while (sessionData[user] === sd) {
+                const item = sd.items.find(i => i.pendingDetect);
+                if (!item) break;
+
+                const pendingLeft = sd.items.filter(i => i.pendingDetect).length;
+                const total = done + fail + removed + pendingLeft;
+                setAddStatus(user, `Mendeteksi ulang video ${done + fail + removed + 1}/${total}...`, 'running');
+
+                try {
+                    const meta = await detectSerial(item.link);
+                    item.cover = meta.cover || item.cover;
+                    if (meta.author && meta.author.username) item.account = meta.author.username;
+                    if (meta.stats) {
+                        item.views = meta.stats.views; item.likes = meta.stats.likes;
+                        item.komens = meta.stats.comments; item.shares = meta.stats.shares; item.saves = meta.stats.saves;
+                    }
+                    if (!item.title) item.title = meta.title || "";
+                    if (!item.hashtags) item.hashtags = meta.hashtagString || "";
+                    if (!item.tglObj && meta.createTime) { const d = new Date(meta.createTime * 1000); item.tglObj = d; item.tglStr = formatTgl(d); }
+                    item.pendingDetect = false;
+
+                    const others = sd.items.filter(x => x !== item);
+                    if (isDupItem(others, item)) { sd.items = others; removed++; } else { done++; }
+                } catch (err) {
+                    item.pendingDetect = false;
+                    if (item.placeholder) sd.items = sd.items.filter(x => x !== item); // baris cuma link & gagal -> dibuang
+                    fail++;
+                }
+
+                finalizeItems(sd);
+                if (sd.items.length <= 300 || (done + fail + removed) % 5 === 0) renderListData(user);
+            }
+        } finally {
+            sd.queueRunning = false;
+        }
+
+        if (sessionData[user] !== sd) return;
+        refreshCard(user);
+        let msg = `Deteksi ulang CSV selesai: ${done} terisi`;
+        if (removed) msg += `, ${removed} dobel dibuang`;
+        if (fail) msg += `, ${fail} gagal terdeteksi`;
+        setAddStatus(user, msg, fail ? 'error' : 'success');
+        addLog(msg, fail && !done ? "error" : "success");
     }
 
     /* ---------- Parser CSV untuk daftar ---------- */
@@ -1362,7 +1472,7 @@
         if (sd.isBusy) return notif("Masih ada proses di daftar ini, tunggu sebentar.");
 
         sd.isBusy = true;
-        let added = 0, dup = 0, blank = 0, detectFailed = 0;
+        let added = 0, dup = 0, blank = 0;
         const problems = [];
 
         try {
@@ -1378,38 +1488,20 @@
                 const rowsParsed = csvRowsToItems(parseCSVRobust(raw));
                 if (!rowsParsed.length) { problems.push(`'${file.name}' tidak ada baris data`); continue; }
 
-                for (let i = 0; i < rowsParsed.length; i++) {
-                    const row = rowsParsed[i];
+                for (const row of rowsParsed) {
                     if (!row.link && !row.title) { blank++; continue; }
-
                     if (isDupItem(sd.items, row)) { dup++; continue; }
 
                     const hasOnlyLink = row.link && !row.title && !row.hashtags && !row.tglObj &&
                         !row.views && !row.likes && !row.komens && !row.shares && !row.saves;
 
-                    if (hasOnlyLink) {
-                        // Baris cuma berisi link -> lengkapi datanya lewat API deteksi.
-                        setAddStatus(user, `Mendeteksi link dari CSV (${i + 1}/${rowsParsed.length})...`, 'running');
-                        try {
-                            const meta = await detectMetaRetry(row.link);
-                            if (!meta.createTime) throw new Error("Tanggal video tidak terdeteksi.");
-                            const item = itemFromMeta(meta, row.link, sd);
-                            if (isDupItem(sd.items, item)) { dup++; continue; }
-                            sd.items.push(item);
-                            added++;
-                        } catch (err) {
-                            detectFailed++;
-                            if (problems.length < 3) problems.push(`${row.link}: ${(err && err.message) || 'gagal terdeteksi'}`);
-                        }
-                        await sleepMs(tikwmDelayMs);
-                        continue;
-                    }
-
+                    // Masuk dulu ke list biasa (bukan "manual"); detail & thumbnail dilengkapi lewat antrian.
                     sd.items.push({
                         id: newItemId(sd), tglObj: row.tglObj, tglStr: row.tglStr,
                         title: row.title, hashtags: row.hashtags, link: row.link, cover: null,
                         views: row.views, likes: row.likes, komens: row.komens, shares: row.shares, saves: row.saves,
-                        isTrashed: false, trashReason: "", isForceRestored: false, isMatched: false, isManual: true
+                        isTrashed: false, trashReason: "", isForceRestored: false, isMatched: false,
+                        fromCSV: true, pendingDetect: !!row.link, placeholder: !!hasOnlyLink
                     });
                     added++;
                 }
@@ -1419,16 +1511,18 @@
         }
 
         finalizeItems(sd);
-        renderUI(user);
+        refreshCard(user);
 
-        let msg = `${added} data dari CSV ditambahkan`;
+        let msg = `${added} data dari CSV masuk ke daftar`;
         if (dup) msg += `, ${dup} sudah ada`;
         if (blank) msg += `, ${blank} baris kosong dilewati`;
-        if (detectFailed) msg += `, ${detectFailed} link gagal terdeteksi`;
         if (problems.length) msg += ` | ${problems.join('; ')}`;
-        const bad = !added && (problems.length || detectFailed);
-        setAddStatus(user, msg, bad ? 'error' : 'success');
-        addLog(msg, bad ? "error" : "success");
+        const queued = sd.items.filter(i => i.pendingDetect).length;
+        if (queued) msg += ` | mendeteksi ulang ${queued} video...`;
+        setAddStatus(user, msg, !added && problems.length ? 'error' : 'success');
+        addLog(msg, !added && problems.length ? "error" : "success");
+
+        if (queued) runDetectQueue(user);
     }
 
     function downloadData(user) {
@@ -1449,23 +1543,54 @@
         notif(`File CSV untuk @${user} berhasil diunduh.`);
     }
 
+    // Akun sebuah item: dari hasil deteksi, atau dari link (@username); kalau tidak ada, pakai cadangan.
+    function accountOfItem(item, fallback) {
+        if (item.account) return String(item.account).replace(/^@/, '');
+        const m = String(item.link || '').match(/tiktok\.com\/@([^\/?#]+)/i);
+        if (m) return decodeURIComponent(m[1]);
+        return fallback;
+    }
+
+    // Push ke spreadsheet dipisah PER AKUN: satu file CSV per akun, supaya tiap akun
+    // masuk ke konfigurasi/spreadsheet-nya sendiri.
     function sendToSheetMapper(user) {
         const sd = sessionData[user];
         const activeItems = sd.items.filter(i => !i.isTrashed);
         
         if(activeItems.length === 0) return notif("Tidak ada data untuk dimasukkan");
 
-        let tglName = formatTgl(sd.dates.start, true).replace(/ /g,'');
-        if(sd.dates.start.getTime() !== sd.dates.end.getTime()) tglName += `-${formatTgl(sd.dates.end, true).replace(/ /g,'')}`;
-        
-        let csv = generateCSVString(activeItems);
-        const fileName = `Laporan_${user}_${tglName}.csv`;
-        
-        const file = new File([csv], fileName, { type: 'text/csv;charset=utf-8;' });
-        processCSVFiles([file]);
+        const fallbackAcc = sd.isManual ? 'tanpa_akun' : user;
+        const groups = {};
+        const order = [];
+        activeItems.forEach(item => {
+            const acc = accountOfItem(item, fallbackAcc);
+            const key = acc.toLowerCase();
+            if (!groups[key]) { groups[key] = { acc, items: [] }; order.push(key); }
+            groups[key].items.push(item);
+        });
+
+        const files = [];
+        order.forEach(key => {
+            const g = groups[key];
+            let start = sd.dates.start, end = sd.dates.end;
+            if (sd.isManual) {
+                const times = g.items.filter(i => i.tglObj).map(i => startOfDay(i.tglObj).getTime());
+                if (times.length) { start = new Date(Math.min(...times)); end = new Date(Math.max(...times)); }
+            }
+            let tglName = formatTgl(start, true).replace(/ /g,'');
+            if(start.getTime() !== end.getTime()) tglName += `-${formatTgl(end, true).replace(/ /g,'')}`;
+
+            const csv = generateCSVString(g.items);
+            const fileName = `Laporan_${g.acc}_${tglName}.csv`;
+            files.push(new File([csv], fileName, { type: 'text/csv;charset=utf-8;' }));
+        });
+
+        processCSVFiles(files);
         
         panggilElementDariID('sheet-mapper').scrollIntoView({ behavior: 'smooth' });
-        addLog(`Sukses memuat CSV: ${fileName}`, "success");
+        addLog(files.length > 1
+            ? `Sukses memuat ${files.length} CSV (per akun): ${files.map(f => f.name).join(', ')}`
+            : `Sukses memuat CSV: ${files[0].name}`, "success");
     }
 
     // Selalu bungkus tiap kolom dengan tanda kutip supaya konten yang punya
